@@ -1,0 +1,47 @@
+logging {
+	level = "warn"
+}
+
+prometheus.exporter.unix "default" {
+	include_exporter_metrics = true
+	disable_collectors       = ["mdadm"]
+}
+
+prometheus.scrape "default" {
+	targets = array.concat(
+		prometheus.exporter.unix.default.targets,
+		[{
+			job         = "alloy",
+			__address__ = "127.0.0.1:6987",
+		}],
+	)
+	forward_to = []
+}
+
+// Scrape metrics from a remote service "microsample"
+prometheus.scrape "loki_lab_e96f52" {
+	targets = [
+		{
+			job         = "microsample-0",
+			__address__ = "10.200.100.182:8080",
+		},
+	]
+	forward_to = []
+}
+
+// Act as a syslog receiver UDP, forward to Loki
+loki.source.syslog "local" {
+	listener {
+		address  = ":51898"
+		protocol = "udp"
+		labels   = {component = "loki.source.syslog", protocol = "udp", juju_unit = "alloy/2"}
+	}
+
+	forward_to = [loki.write.local.receiver]
+}
+
+loki.write "local" {
+	endpoint {
+		url = "http://127.0.0.1:3100/loki/api/v1/push"
+	}
+}

@@ -1,0 +1,49 @@
+logging {
+  level = "warn"
+}
+
+prometheus.exporter.unix "default" {
+  include_exporter_metrics = true
+  disable_collectors       = ["mdadm"]
+}
+
+prometheus.scrape "default" {
+  targets = array.concat(
+    prometheus.exporter.unix.default.targets,
+    [{
+      job         = "alloy",
+      __address__ = "127.0.0.1:6987",
+    }],
+  )
+
+  forward_to = []
+}
+
+//
+// LOGS → LOKI (Juju topology labels)
+//
+
+loki.source.journal "journald" {
+  forward_to = [loki.process.juju.receiver]
+}
+
+loki.process "juju" {
+  stage.static_labels {
+    values = {
+      juju_model       = "loki-dev-phase0-2",
+      juju_model_uuid  = "5f4407f5-dc26-434c-8c64-25895d72e442",
+      juju_application = "alloy-vm",
+      juju_unit        = "alloy-vm/0",
+      juju_charm       = "alloy-vm",
+      service_name     = "alloy-example.service",
+    }
+  }
+  forward_to = [loki.write.main.receiver]
+}
+
+
+loki.write "main" {
+  endpoint {
+    url = "http://10.232.126.213:3100/loki/api/v1/push"
+  }
+}

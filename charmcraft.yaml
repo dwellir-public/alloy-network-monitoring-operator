@@ -1,0 +1,226 @@
+name: alloy-network-monitoring
+
+type: charm
+
+title: Grafana Alloy Network Monitoring
+
+platforms:
+  ubuntu@22.04:amd64:
+  ubuntu@24.04:amd64:
+
+summary: NetBox-discovered SNMPv3 monitoring with Grafana Alloy on Ubuntu.
+
+description: |
+  Grafana Alloy is a vendor-neutral distribution of the OpenTelemetry Collector.
+
+  This machine charm installs and manages Alloy on Ubuntu VMs and will expose
+  integrations for sending logs to Loki, receiving syslog inputs, scraping
+  Prometheus metrics, and forwarding metrics upstream over remote write.
+
+config:
+  options:
+    network-monitoring-enabled:
+      description: Enable read-only NetBox discovery and embedded SNMPv3 collection.
+      type: boolean
+      default: false
+    netbox-url:
+      description: NetBox HTTP(S) base URL, including any deployment path prefix.
+      type: string
+      default: ""
+    netbox-token:
+      description: Juju secret URI or ID containing a token field; grant it to this application.
+      type: string
+      default: ""
+    snmp-auth:
+      description: |
+        Juju secret URI or ID containing snmp-yaml with an auths mapping of named
+        SNMPv3 profiles. Devices select a profile through their snmp_auth custom
+        field. Grant the secret to this application. Plaintext credentials are
+        not accepted as configuration.
+      type: string
+      default: ""
+    netbox-auth-scheme:
+      description: Authorization scheme, Bearer for NetBox v2 tokens or Token for v1 tokens.
+      type: string
+      default: Bearer
+    netbox-ca:
+      description: Optional Juju secret URI or ID containing a ca-pem field for a private CA.
+      type: string
+      default: ""
+    netbox-site:
+      description: Optional exact NetBox site slug; empty selects all sites.
+      type: string
+      default: ""
+    netbox-region:
+      description: Optional NetBox region slug; empty imposes no region filter.
+      type: string
+      default: ""
+    netbox-tags:
+      description: Optional comma-separated tag slugs; devices must match every supplied tag.
+      type: string
+      default: ""
+    netbox-status:
+      description: Optional device status slug; empty includes all statuses.
+      type: string
+      default: active
+    collector-id:
+      description: Stable unique monitoring scope identifier, required when network monitoring is enabled.
+      type: string
+      default: ""
+    netbox-refresh-interval:
+      description: Inventory refresh interval, independent of device scraping.
+      type: string
+      default: 60s
+    snmp-scrape-interval:
+      description: SNMP scrape interval as a positive Prometheus duration.
+      type: string
+      default: 30s
+    snmp-scrape-timeout:
+      description: SNMP scrape timeout, shorter than the scrape interval.
+      type: string
+      default: 15s
+    log-level:
+      description: |
+        Configures the log level of the Alloy process.
+
+        Acceptable values are: "info", "debug", "warning", "error" and "critical"
+      default: "info"
+      type: string
+    config-override:
+      description: |
+        Full Alloy configuration file as a string. When set, this overrides the
+        generated configuration entirely. Set to empty to revert to generated config.
+      type: string
+      default: ""
+    systemd-units:
+      description: |
+        Comma-separated list of systemd unit names to forward to Loki
+        (e.g. "ssh.service, snapd.service"). Leave empty to disable.
+      type: string
+      default: ""
+    journal-kernel:
+      description: |
+        Include host kernel journal messages by adding `_TRANSPORT=kernel` to
+        the broader host journal capture path. These logs are forwarded to Loki
+        without Juju topology labels.
+      type: boolean
+      default: false
+    journal-match-expressions:
+      description: |
+        Newline-separated raw journald match expressions to include in the
+        broader host journal capture path (for example `SYSLOG_IDENTIFIER=lxd`).
+        These expressions are passed through without validation and forwarded to
+        Loki without Juju topology labels.
+      type: string
+      default: ""
+    custom_args:
+      description: |
+        Custom arguments for the Alloy service.
+      default: "--server.http.listen-addr=0.0.0.0:6987"
+      type: string
+    alloy-livedebugging:
+      description: |
+        Enable live debugging mode for Alloy. When enabled, the charm sets
+        CUSTOM_ARGS to listen on 0.0.0.0:12345 and injects a livedebugging
+        block into generated Alloy config. Disabling restores previous args.
+      default: false
+      type: boolean
+    enable-syslogreceivers:
+      description: |
+        Enable Alloy syslog listeners for remote syslog ingestion. When true,
+        Alloy listens on both TCP and UDP port 1514 and forwards incoming logs
+        directly to Loki (without Juju topology relabeling).
+      default: false
+      type: boolean
+    syslog-drop-access-logs:
+      description: |
+        Drop common request-style remote syslog lines before forwarding them to
+        Loki. This is intended as a second guardrail for high-volume senders
+        such as HAProxy and only affects remote syslog received through
+        `syslog-receiver`.
+      default: false
+      type: boolean
+    syslog-drop-expressions:
+      description: |
+        Newline-separated regular expressions to drop from remote syslog before
+        forwarding to Loki. These expressions apply only to logs received
+        through `syslog-receiver`.
+      default: ""
+      type: string
+    syslog-rate-limit:
+      description: |
+        Maximum number of remote syslog lines per second to forward after drop
+        rules are applied. Set to 0 to disable Alloy-side rate limiting.
+      default: 0
+      type: int
+    syslog-rate-burst:
+      description: |
+        Maximum remote syslog burst size when `syslog-rate-limit` is enabled.
+        Set to 0 to use the same value as `syslog-rate-limit`.
+      default: 0
+      type: int
+    manual-metrics-jobs:
+      description: |
+        YAML list of manual metrics scrape jobs for non-related Prometheus targets.
+        Alloy only enables these jobs when `send-remote-write` is related.
+
+        Supported fields per job:
+        - `name`
+        - `targets`
+        - `metrics_path`
+        - `scheme`
+        - `scrape_interval`
+        - `scrape_timeout`
+        - `insecure_skip_verify`
+        - `labels`
+      default: ""
+      type: string
+
+parts:
+  cos-tool:
+    plugin: dump
+    source: https://github.com/canonical/cos-tool/releases/download/rel-20260713/cos-tool-amd64
+    source-type: file
+    source-checksum: sha256/1952c30d009e5a94bb9d7174116a5ed5f05b18b37bcf39854468b81728247acd
+    organize:
+      cos-tool-amd64: cos-tool-amd64
+    override-prime: |
+      craftctl default
+      chmod 0755 "$CRAFT_PRIME/cos-tool-amd64"
+  charm:
+    plugin: uv
+    source: .
+    build-snaps:
+      - astral-uv
+
+requires:
+  machine-observability:
+    interface: machine_observability
+    optional: true
+    description: Collect machine-local workload telemetry from related principal charms.
+  send-loki-logs:
+    interface: loki_push_api
+    optional: true
+    description: Send logs to a Loki provider.
+  metrics-endpoint:
+    interface: prometheus_scrape
+    optional: true
+    description: Scrape Prometheus metrics from related workloads.
+  send-remote-write:
+    interface: prometheus_remote_write
+    optional: true
+    description: Send scraped metrics to an upstream Prometheus remote write receiver.
+  grafana-cloud-config:
+    interface: grafana_cloud_config
+    optional: true
+    description: Receive Grafana Cloud observability endpoints and credentials.
+
+provides:
+  syslog-receiver:
+    interface: syslog
+    optional: true
+    description: Receive syslog messages from other units.
+
+peers:
+  alloy-peers:
+    interface: alloy_peers

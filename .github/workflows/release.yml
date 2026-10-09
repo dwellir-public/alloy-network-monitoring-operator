@@ -1,0 +1,227 @@
+name: Release Charm to Charmhub and GitHub
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-latest-edge
+  cancel-in-progress: false
+
+jobs:
+
+  build-ubuntu-22:
+    name: Build charm on ubuntu-22.04
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Install Charmcraft
+        run: sudo snap install charmcraft --classic --channel latest/stable
+
+      - name: Build charm for ubuntu@22.04:amd64
+        run: sudo charmcraft pack --quiet --destructive-mode --platform ubuntu@22.04:amd64 --quiet
+
+      - name: Upload charm artifact (ubuntu@22.04:amd64)
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: charm-ubuntu-22-amd64
+          path: ./alloy-network-monitoring_ubuntu@22.04-amd64.charm
+          if-no-files-found: error
+
+  build-ubuntu-24:
+    name: Build charm on ubuntu-24.04
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Install Charmcraft
+        run: sudo snap install charmcraft --classic --channel latest/stable
+
+      - name: Build charm for ubuntu@24.04:amd64
+        run: sudo charmcraft pack --destructive-mode --platform ubuntu@24.04:amd64 --quiet
+
+      - name: Upload charm artifact (ubuntu@24.04:amd64)
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: charm-ubuntu-24-amd64
+          path: ./alloy-network-monitoring_ubuntu@24.04-amd64.charm
+          if-no-files-found: error
+
+  release:
+    name: Release to CharmHub
+    needs:
+      - build-ubuntu-22
+      - build-ubuntu-24
+    runs-on: ubuntu-latest
+    outputs:
+      rev_ubuntu_22: ${{ steps.upload_ubuntu_22.outputs.revision }}
+      rev_ubuntu_24: ${{ steps.upload_ubuntu_24.outputs.revision }}
+      release_channel: latest/edge
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Download built charm artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: charm-ubuntu-*-amd64
+          merge-multiple: true
+          path: .
+
+      - name: Install Charmcraft
+        run: sudo snap install charmcraft --classic --channel latest/stable
+
+      - name: Upload ubuntu@22.04 charm to Charmhub edge
+        id: upload_ubuntu_22
+        env:
+          CHARMCRAFT_AUTH: "${{ secrets.CHARMHUB_TOKEN }}"
+        run: |
+          set -euo pipefail
+
+          output="$(charmcraft upload --format json --release latest/edge ./alloy-network-monitoring_ubuntu@22.04-amd64.charm)"
+          echo "$output"
+
+          revision="$(python3 -c 'import json, sys; print(json.loads(sys.stdin.read())["revision"])' <<< "$output")"
+          if [[ ! "$revision" =~ ^[1-9][0-9]*$ ]]; then
+            echo "Charmcraft upload JSON did not include a positive integer revision for ubuntu@22.04" >&2
+            exit 1
+          fi
+
+          echo "revision=$revision" >> "$GITHUB_OUTPUT"
+
+      - name: Upload ubuntu@24.04 charm to Charmhub edge
+        id: upload_ubuntu_24
+        env:
+          CHARMCRAFT_AUTH: "${{ secrets.CHARMHUB_TOKEN }}"
+        run: |
+          set -euo pipefail
+
+          output="$(charmcraft upload --format json --release latest/edge ./alloy-network-monitoring_ubuntu@24.04-amd64.charm)"
+          echo "$output"
+
+          revision="$(python3 -c 'import json, sys; print(json.loads(sys.stdin.read())["revision"])' <<< "$output")"
+          if [[ ! "$revision" =~ ^[1-9][0-9]*$ ]]; then
+            echo "Charmcraft upload JSON did not include a positive integer revision for ubuntu@24.04" >&2
+            exit 1
+          fi
+
+          echo "revision=$revision" >> "$GITHUB_OUTPUT"
+
+  github-release:
+    name: Create GitHub release
+    needs:
+      - release
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Download built charm artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: charm-ubuntu-*-amd64
+          merge-multiple: true
+          path: .
+
+      - name: Build release metadata from Charmhub revisions
+        id: release_meta
+        env:
+          CHANNEL: ${{ needs.release.outputs.release_channel }}
+          REVISION_22: ${{ needs.release.outputs.rev_ubuntu_22 }}
+          REVISION_24: ${{ needs.release.outputs.rev_ubuntu_24 }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$CHANNEL" != "latest/edge" ]]; then
+            echo "Unexpected Charmhub release channel: $CHANNEL" >&2
+            exit 1
+          fi
+          if [[ ! "$REVISION_22" =~ ^[1-9][0-9]*$ ]]; then
+            echo "Missing or invalid ubuntu@22.04 Charmhub revision output" >&2
+            exit 1
+          fi
+          if [[ ! "$REVISION_24" =~ ^[1-9][0-9]*$ ]]; then
+            echo "Missing or invalid ubuntu@24.04 Charmhub revision output" >&2
+            exit 1
+          fi
+
+          tag="latest-edge-r${REVISION_22}-r${REVISION_24}"
+          name="Charm release ${tag}"
+
+          {
+            echo "tag=$tag"
+            echo "name=$name"
+            echo "body<<EOF"
+            echo "Published to Charmhub channel \`${CHANNEL}\`."
+            echo
+            echo "- ubuntu@22.04:amd64 revision: \`${REVISION_22}\`"
+            echo "- ubuntu@24.04:amd64 revision: \`${REVISION_24}\`"
+            echo
+            echo "Source commit: \`${GITHUB_SHA}\`."
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Verify existing release tag provenance
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release_meta.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! "$TAG" =~ ^latest-edge-r[1-9][0-9]*-r[1-9][0-9]*$ ]]; then
+            echo "Invalid release tag: $TAG" >&2
+            exit 1
+          fi
+
+          tag_ref="refs/tags/${TAG}"
+          remote_tags="$(git -c credential.helper='!f() { echo username=x-access-token; echo "password=${GITHUB_TOKEN}"; }; f' ls-remote origin "$tag_ref" "${tag_ref}^{}")"
+          if [[ -n "$remote_tags" ]]; then
+            existing_sha="$(awk -v peeled_ref="${tag_ref}^{}" '$2 == peeled_ref { print $1; exit }' <<< "$remote_tags")"
+            if [[ -z "$existing_sha" ]]; then
+              existing_sha="$(awk -v tag_ref="$tag_ref" '$2 == tag_ref { print $1; exit }' <<< "$remote_tags")"
+            fi
+            if [[ "$existing_sha" != "$GITHUB_SHA" ]]; then
+              echo "Existing release tag $TAG points to $existing_sha, not $GITHUB_SHA" >&2
+              exit 1
+            fi
+          fi
+
+      - name: Create GitHub release and upload charm artifacts
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3
+        with:
+          tag_name: ${{ steps.release_meta.outputs.tag }}
+          name: ${{ steps.release_meta.outputs.name }}
+          target_commitish: ${{ github.sha }}
+          body: ${{ steps.release_meta.outputs.body }}
+          generate_release_notes: true
+          prerelease: true
+          make_latest: false
+          fail_on_unmatched_files: true
+          files: |
+            ./alloy-network-monitoring_ubuntu@22.04-amd64.charm
+            ./alloy-network-monitoring_ubuntu@24.04-amd64.charm

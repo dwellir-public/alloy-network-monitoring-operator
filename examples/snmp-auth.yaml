@@ -1,0 +1,17 @@
+auths:
+  opnsense:
+    version: 3
+    username: monitoring
+    security_level: authPriv
+    auth_protocol: SHA256
+    password: REPLACE-WITH-OPNSENSE-AUTH-PASSPHRASE
+    priv_protocol: AES
+    priv_password: REPLACE-WITH-OPNSENSE-PRIVACY-PASSPHRASE
+  cisco:
+    version: 3
+    username: monitoring
+    security_level: authPriv
+    auth_protocol: SHA
+    password: REPLACE-WITH-CISCO-AUTH-PASSPHRASE
+    priv_protocol: AES
+    priv_password: REPLACE-WITH-CISCO-PRIVACY-PASSPHRASE

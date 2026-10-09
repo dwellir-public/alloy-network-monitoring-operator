@@ -1,0 +1,92 @@
+logging {
+  level = "warn"
+}
+
+prometheus.exporter.unix "default" {
+  include_exporter_metrics = true
+  disable_collectors       = ["mdadm"]
+}
+
+prometheus.scrape "default" {
+  targets = array.concat(
+    prometheus.exporter.unix.default.targets,
+    [{
+      // Self-collect metrics
+      job         = "alloy",
+      __address__ = "127.0.0.1:6987",
+    }],
+  )
+
+  forward_to = []
+}
+
+livedebugging {
+  enabled = true
+}
+
+// LOGS -> LOKI (Juju topology labels)
+
+loki.source.journal "journald" {
+  matches = "_SYSTEMD_UNIT=ssh.service"
+  forward_to = [loki.process.juju.receiver]
+}
+
+loki.relabel "syslog" {
+  forward_to = []
+
+  rule {
+    source_labels = ["__syslog_connection_ip_address"]
+    target_label  = "source_ip"
+  }
+
+  rule {
+    source_labels = ["__syslog_message_hostname"]
+    target_label  = "syslog_hostname"
+  }
+
+  rule {
+    source_labels = ["__syslog_message_severity"]
+    target_label  = "level"
+  }
+
+  rule {
+    source_labels = ["__syslog_message_severity"]
+    target_label  = "severity"
+  }
+}
+
+loki.source.syslog "receiver" {
+  relabel_rules = loki.relabel.syslog.rules
+
+  listener {
+    address = ":1514"
+    labels  = {component = "loki.source.syslog", protocol = "tcp", log_source = "remote_syslog"}
+  }
+
+  listener {
+    address  = ":1514"
+    protocol = "udp"
+    labels   = {component = "loki.source.syslog", protocol = "udp", log_source = "remote_syslog"}
+  }
+
+  forward_to = [loki.write.main.receiver]
+}
+
+loki.process "juju" {
+  stage.static_labels {
+    values = {
+      juju_model = "loki-dev-phase0-2",
+      juju_model_uuid = "5f4407f5-dc26-434c-8c64-25895d72e442",
+      juju_application = "alloy-vm",
+      juju_unit = "alloy-vm/7",
+      juju_charm = "alloy-vm",
+    }
+  }
+  forward_to = [loki.write.main.receiver]
+}
+
+loki.write "main" {
+  endpoint {
+    url = "http://10.232.126.213:3100/loki/api/v1/push"
+  }
+}

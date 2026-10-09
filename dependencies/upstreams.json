@@ -1,0 +1,38 @@
+{
+  "cosl": {
+    "repository": "https://github.com/canonical/cos-lib",
+    "role": "runtime",
+    "distribution": "cosl",
+    "source_path": "src/cosl"
+  },
+  "machine_observability": {
+    "repository": "https://github.com/dwellir-public/dwellir-observability-reference",
+    "role": "runtime-vendored",
+    "source_path": "lib/charms/dwellir_observability/v0/machine_observability.py",
+    "distribution": null
+  },
+  "cloud_config_requirer": {
+    "repository": "https://github.com/canonical/grafana-cloud-integrator",
+    "role": "runtime-vendored",
+    "source_path": "lib/charms/grafana_cloud_integrator/v0/cloud_config_requirer.py",
+    "distribution": null
+  },
+  "loki_push_api": {
+    "repository": "https://github.com/canonical/loki-k8s-operator",
+    "role": "runtime-vendored",
+    "source_path": "lib/charms/loki_k8s/v1/loki_push_api.py",
+    "distribution": null
+  },
+  "prometheus_scrape": {
+    "repository": "https://github.com/canonical/prometheus-k8s-operator",
+    "role": "runtime-vendored",
+    "source_path": "lib/charms/prometheus_k8s/v0/prometheus_scrape.py",
+    "distribution": null
+  },
+  "prometheus_remote_write": {
+    "repository": "https://github.com/canonical/prometheus-k8s-operator",
+    "role": "runtime-vendored",
+    "source_path": "lib/charms/prometheus_k8s/v1/prometheus_remote_write.py",
+    "distribution": null
+  }
+}

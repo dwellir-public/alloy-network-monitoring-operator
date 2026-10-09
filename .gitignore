@@ -1,0 +1,35 @@
+# Python
+.venv/
+.venv-renamed/
+venv/
+__pycache__/
+*.py[cod]
+.mypy_cache/
+.pytest_cache/
+.pyright/
+.ruff_cache/
+.tox/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+*.egg-info/
+build/
+dist/
+
+# Charmcraft
+*.charm
+**/parts/
+**/prime/
+**/stage/
+
+# Editors
+.idea/
+.vscode/
+*.swp
+*~
+
+# Misc
+.DS_Store
+.charm_tracing_buffer.raw
+.worktrees/

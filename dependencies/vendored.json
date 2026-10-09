@@ -1,0 +1,81 @@
+[
+  {
+    "path": "lib/charms/dwellir_observability/v0/machine_observability.py",
+    "sha256": "f93196c38bbd8343b1d72173e860e1adf5ddf04ce728fae36d6e57fc3916e679",
+    "library": {
+      "LIBID": "0b7d5c45f19b4b4b9876db265b31af48",
+      "LIBAPI": 0,
+      "LIBPATCH": 5
+    },
+    "scope": "runtime",
+    "upstream_path": "lib/charms/dwellir_observability/v0/machine_observability.py",
+    "repository": "https://github.com/dwellir-public/alloy-vm-operator",
+    "commit": "79c7bec7791484e4d51f6270fb4c5727d3d1c1a9",
+    "license": "Apache-2.0",
+    "upstream_owner_repository": "https://github.com/dwellir-public/dwellir-observability-reference",
+    "upstream_base_commit": "652940840eede415b3a5af8de5661f552fe3de7c",
+    "modifications": "None: exact copy of authoritative machine-observability reference."
+  },
+  {
+    "path": "lib/charms/grafana_cloud_integrator/v0/cloud_config_requirer.py",
+    "sha256": "9ac03312adfd8007179463808ead2668b180f3492949502775a27a6af6b15002",
+    "library": {
+      "LIBID": "e6f580481c1b4388aa4d2cdf412a47fa",
+      "LIBAPI": 0,
+      "LIBPATCH": 11
+    },
+    "scope": "runtime",
+    "upstream_path": "lib/charms/grafana_cloud_integrator/v0/cloud_config_requirer.py",
+    "repository": "https://github.com/dwellir-public/alloy-vm-operator",
+    "commit": "4e42fc9ab0b3c41e731caf12bc6694119f47f063",
+    "license": "Apache-2.0",
+    "upstream_owner_repository": "https://github.com/canonical/grafana-cloud-integrator",
+    "upstream_base_commit": null,
+    "modifications": "Downstream implementation retains Canonical LIBID/API/PATCH but no exact Canonical base found. Removes relation-data credential logging from initial downstream import 13c9429e4c100a4bcaa27f86350e415bdad0b12e."
+  },
+  {
+    "path": "lib/charms/loki_k8s/v1/loki_push_api.py",
+    "sha256": "8b148c535578c8b697ed58bea65a8c53eea488bc2dea019e5e46f94cfb72a14e",
+    "library": {
+      "LIBID": "bf76f23cdd03464b877c52bd1d2f563e",
+      "LIBAPI": 1,
+      "LIBPATCH": 22
+    },
+    "scope": "runtime",
+    "upstream_path": "lib/charms/loki_k8s/v1/loki_push_api.py",
+    "repository": "https://github.com/canonical/loki-k8s-operator",
+    "commit": "1b0095dab63ff961d137de101db25c008259595a",
+    "license": "Apache-2.0"
+  },
+  {
+    "path": "lib/charms/prometheus_k8s/v0/prometheus_scrape.py",
+    "sha256": "ad30dcd31175da3d35aaf9314120f912cd6fa875dada3ef95de9fe6bd7125f8e",
+    "library": {
+      "LIBID": "bc84295fef5f4049878f07b131968ee2",
+      "LIBAPI": 0,
+      "LIBPATCH": 56
+    },
+    "scope": "runtime",
+    "upstream_path": "lib/charms/prometheus_k8s/v0/prometheus_scrape.py",
+    "repository": "https://github.com/canonical/prometheus-k8s-operator",
+    "commit": "ca8bf34af89eb0f473c4530f5d496badf233362f",
+    "license": "Apache-2.0"
+  },
+  {
+    "path": "lib/charms/prometheus_k8s/v1/prometheus_remote_write.py",
+    "sha256": "33c1522ce3509c3f81ad74631165977c7a67a0630bbf668eee71551b29fa8362",
+    "library": {
+      "LIBID": "f783823fa75f4b7880eb70f2077ec259",
+      "LIBAPI": 1,
+      "LIBPATCH": 12
+    },
+    "scope": "runtime",
+    "upstream_path": "lib/charms/prometheus_k8s/v1/prometheus_remote_write.py",
+    "repository": "https://github.com/dwellir-public/alloy-vm-operator",
+    "commit": "9686a0230b5c2e6442de5956398d39ddb0403741",
+    "license": "Apache-2.0",
+    "upstream_owner_repository": "https://github.com/canonical/prometheus-k8s-operator",
+    "upstream_base_commit": "4b3d229c3021ce01a2b569b06a74204a76ecf177",
+    "modifications": "Adds tenant-id, application, model, model_uuid relation metadata; removes deepcopy around generic aggregator rules."
+  }
+]
