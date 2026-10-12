@@ -1,6 +1,8 @@
-# Developing alloy-vm
+# Developing alloy-network-monitoring
 
-This document describes common developer workflows for the charm.
+Run commands from the checkout root. See the
+[architecture guide](docs/charm-architecture.md) for runtime boundaries and the
+[build/test guide](docs/build-test-deploy.md) for artifacts and live acceptance.
 
 ## Dependency management (uv)
 
@@ -8,76 +10,43 @@ The charm uses `uv` for dependency management. Update Python dependencies in
 `pyproject.toml`, then refresh the lockfile:
 
 ```bash
-cd /home/erik/Loki-project/alloy-vm-operator
 uv lock
 ```
 
-If you need to install deps locally for development, you can sync all groups:
+Install the locked development environment:
 
 ```bash
-cd /home/erik/Loki-project/alloy-vm-operator
-uv sync --all-groups
-```
-
-For a single development environment (unit + integration + lint), use:
-
-```bash
-cd /home/erik/Loki-project/alloy-vm-operator
-uv sync --group dev
+uv sync --locked --group dev
 ```
 
 ## Running tests
 
-### Unit tests
-
-Install unit-test dependencies and run the suite:
+Run the local checks:
 
 ```bash
-cd /home/erik/Loki-project/alloy-vm-operator
-uv sync --group unit
-uv run pytest tests/unit
+uv run tox -e lint,static,unit,provenance
 ```
 
-To focus on charm unit tests:
+To focus on charm unit tests without repeating every check:
 
 ```bash
-uv run pytest -k charm
+uv run pytest tests/unit/test_charm.py
 ```
 
-### Integration tests
-
-Integration tests use Jubilant and require:
-* A Juju model
-* A built charm locally as it looks for a charm file in the current directory
-
-Note: Integration tests may take a few minutes to complete.
-Note: Each integration test run creates a temporary Juju model (jubilant-xxxx). The model name
-and controller are printed at test start for easier tracking/cleanup.
+Native Alloy checks use the checksum-pinned executable:
 
 ```bash
-cd /home/erik/Loki-project/alloy-vm-operator
-charmcraft pack
-uv sync --group integration
-uv run pytest tests/integration
+python3 tools/fetch_alloy.py --output build/alloy-linux-amd64
+ALLOY_BINARY=build/alloy-linux-amd64 uv run tox -e binary
 ```
 
-Alternatively, set `CHARM_PATH` to an existing `.charm` file:
-
-```bash
-CHARM_PATH=/path/to/alloy-vm_ubuntu@<base>-amd64.charm uv run pytest tests/integration
-```
-
-Note: Rebuild the charm (`charmcraft pack`) after code changes so integration tests
-use the latest artifact.
-
-If you run pytest without uv, make sure `ops` is installed and `PYTHONPATH` includes `src`:
-
-```bash
-PYTHONPATH=src pytest tests/unit
-```
-
-Note: integration tests are skipped automatically if `jubilant` is not installed.
-
+Jubilant integration tests require an explicit controller-qualified nonproduction
+`TEST_MODEL`, `TEST_MODEL_IS_NONPRODUCTION=yes`, matching `CHARM_PATH`/`TEST_BASE`
+and additional provider/query inputs for backend checks. Rebuild after runtime
+changes. The suite skips absent required inputs; it never creates or destroys
+the selected model. It creates and removes only owned test applications,
+synthetic secrets and newly allocated empty machines. Follow the
+[live-test instructions](docs/build-test-deploy.md#explicit-live-artifact-test).
 
 ## Dependency ownership and BOMs
 
@@ -111,3 +80,14 @@ BOMs as artifacts rather than source files.
 Rule compression uses Canonical's public `cosl` API. Rule acceptance, retention
 and size policy belong to this charm; no shared Dwellir transport package or
 cross-repository source synchronization is required.
+
+## Documentation and local records
+
+Maintain the operator, architecture and build/test guides alongside behavior
+changes. Keep public placeholder examples under `examples/`. The original
+`PLAN.md` remains a design reference; current behavior is described by the guides.
+
+Historical audits, plans, investigations and captured execution evidence are
+kept in the ignored `.local-docs/` archive for this workspace. New runtime test
+observations go under `build/`. These local records are not part of a fresh clone
+or the charm artifact. Do not commit credentials or private operator inputs.

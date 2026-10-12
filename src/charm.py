@@ -44,6 +44,7 @@ from config_builder import (
     DEFAULT_CONFIG_PATH,
     DEFAULT_PACKAGE_CONFIG_BACKUP_PATH,
     ConfigBuilder,
+    InvalidLogLevelError,
     LogSourceGroup,
     MetricsScrapeJob,
     ScrapeTarget,
@@ -460,7 +461,19 @@ class AlloyCharm(ops.CharmBase):
         if not collector:
             return []
         owner = f"{self.model.uuid}_{self.app.name}"
-        return network_alert_groups(collector, owner)
+        return network_alert_groups(
+            collector,
+            owner,
+            topology_labels=self._topology.as_dict(
+                remapped_keys={
+                    "model": "juju_model",
+                    "model_uuid": "juju_model_uuid",
+                    "application": "juju_application",
+                    "unit": "juju_unit",
+                    "charm_name": "juju_charm",
+                }
+            ),
+        )
 
     def _set_rule_destination_status(
         self,
@@ -1000,10 +1013,15 @@ class AlloyCharm(ops.CharmBase):
             return ops.BlockedStatus(contract_error)
         try:
             config_text = self._render_config_text(manual_metrics_jobs=manual_metrics_jobs)
-        except ValueError:
+        except ValueError as exc:
             self._discard_staged_secrets()
             self._stop_network_on_access_failure()
-            return ops.BlockedStatus("Invalid Alloy runtime arguments")
+            message = (
+                str(exc)
+                if isinstance(exc, InvalidLogLevelError)
+                else "Invalid Alloy runtime arguments"
+            )
+            return ops.BlockedStatus(message)
         desired_custom_args = self._desired_custom_args()
         live_debugging = self._live_debugging_enabled()
         syslog_receivers_enabled = self._syslog_receivers_enabled()
@@ -1069,6 +1087,11 @@ class AlloyCharm(ops.CharmBase):
             if alloy.is_active() and not restart_required:
                 self._reload_alloy(api_address)
             else:
+                if restart_required:
+                    logger.info("Alloy runtime arguments changed; restarting to apply settings")
+                    self.unit.status = ops.MaintenanceStatus(
+                        "Applying changed Alloy runtime arguments; restart required"
+                    )
                 alloy.restart()
                 if api_address:
                     alloy.wait_ready(api_address)
@@ -1215,6 +1238,12 @@ class AlloyCharm(ops.CharmBase):
             log_source_groups=self._machine_observability_log_source_groups(),
             network_pipeline=self._network_pipeline,
             self_metrics_address=self._self_metrics_address(),
+            log_level=str(self.config.get("log-level", "info")),
+            collector_id=(
+                self._stored.last_network_collector
+                if self.config.get("network-monitoring-enabled")
+                else ""
+            ),
         )
         return f"{alloy.GENERATED_CONFIG_HEADER}{builder.build()}"
 
@@ -1257,7 +1286,7 @@ class AlloyCharm(ops.CharmBase):
         alloy.write_service_defaults(self._desired_custom_args())
 
     def _desired_custom_args(self) -> str:
-        return str(self.config.get("custom_args", "--server.http.listen-addr=0.0.0.0:6987"))
+        return str(self.config.get("custom_args", "--server.http.listen-addr=127.0.0.1:6987"))
 
     def _self_metrics_address(self) -> str:
         """Scrape the local listener selected by the actual service arguments."""

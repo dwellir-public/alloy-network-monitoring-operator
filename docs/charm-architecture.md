@@ -31,9 +31,13 @@ existing telemetry sources and destinations.
 All relation definitions and vendored libraries retain their previous contracts.
 Machine-observability inputs preserve each provider's source topology. Related
 and manual metrics use the shared existing writer; logs use existing Loki
-outputs. Device samples use stable NetBox identity and collector scope without
-borrowing collector Juju ownership. Local host and Alloy self metrics retain
-collector Juju topology.
+outputs. Device samples use NetBox identity, target-IP instances and collector
+Juju topology as collection provenance. Incoming syslog and local host journal
+logs receive collector topology; provider metrics/logs retain their own source
+topology. External scrape jobs without provider identity receive collector
+context, while partial provider topology is preserved without invented fields.
+Local host and Alloy self metrics retain collector Juju topology. Self metrics
+keep the last applied collector label during secret withdrawal.
 
 The existing v3 rule pipeline continues to validate, cache and forward owned
 Prometheus/Loki artifacts. [network_alerts.py](../src/network_alerts.py) adds
@@ -43,6 +47,10 @@ directly from their providers to Grafana.
 
 The writer name and package storage configuration remain stable. Charm refresh
 skips workload installation, rewriting and restarting in `upgrade-charm`.
+Normal configuration reconciliation can subsequently restart Alloy when runtime
+arguments change, including migration to a new default listener; this is logged
+and signalled in status. With unchanged arguments, logging, profile and label
+changes apply through reload. The default management listener is loopback.
 Discovery changes happen in Alloy without charm events or restarts. Missing
 destinations disable network collection; a configured destination outage uses
 the bounded remote-write WAL. See the [operator guide](network-monitoring.md) for

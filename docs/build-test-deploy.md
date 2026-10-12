@@ -14,13 +14,15 @@ The binary suite runs generated discovery rules in Alloy with loopback HTTP
 fixtures. Supply the tested Alloy 1.20.1 executable:
 
 ```bash
-uv run pytest tests/binary --alloy-binary=/path/to/alloy
+python3 tools/fetch_alloy.py --output build/alloy-linux-amd64
+uv run pytest tests/binary --alloy-binary=build/alloy-linux-amd64
 ```
 
 It checks eligibility, both profile selections, final labels, protected component
 output, discovery failure retention, successful empty inventory and invalid
 reload recovery. It needs local sockets. It does not simulate successful SNMP
-collection from an appliance.
+collection from an appliance. The download verifies the tested executable's
+SHA-256; PR CI runs this same native suite without first formatting source.
 
 ## Build artifacts
 
@@ -60,6 +62,38 @@ Repeat for 22.04 with its matching artifact/base. The suite skips when no explic
 model or artifact is provided. This command deploys a workload and incurs the
 selected model's machine cost; use a disposable lab model.
 
+For actual relation/backend and refresh checks, provide backend integrations
+already available in the selected nonproduction model and their query URLs:
+
+```bash
+TEST_MODEL=controller:alloy-lab \
+TEST_MODEL_IS_NONPRODUCTION=yes \
+CHARM_PATH=./alloy-network-monitoring_ubuntu@24.04-amd64.charm \
+PREVIOUS_CHARM_PATH=/path/to/previous-24.04.charm \
+TEST_BASE=ubuntu@24.04 \
+TEST_REMOTE_WRITE_PROVIDER=mimir:receive-remote-write \
+TEST_MIMIR_QUERY_URL=http://mimir.example/prometheus/api/v1/query \
+TEST_LOKI_PROVIDER=loki:loki_push_api \
+TEST_LOKI_QUERY_URL=http://loki.example/loki/api/v1/query_range \
+uv run pytest tests/integration -q
+```
+
+Loki provider/query inputs must be supplied together; omitted Loki inputs leave
+log ingestion unverified. The backend test skips if its required Mimir inputs
+are absent. Supplying a previous artifact establishes an old-to-new refresh;
+without it, refresh uses the current artifact and cannot prove that upgrade path.
+
+The test creates uniquely named applications, fake Juju secrets and loopback
+inventory/metrics sources. A colocated fixture publishes real provider topology
+using the unchanged v3 library. It verifies fresh Mimir/Loki labels, logging
+validation, credential rotation/withdrawal and PID/start-time/WAL continuity.
+It fixes listener arguments before the refresh so the continuity check covers
+unchanged runtime arguments. The SNMP target has no agent: `up=0` confirms
+discovery, labeling and delivery, while real interface counters need appliance
+acceptance. Cleanup removes only owned applications, secrets and newly allocated
+empty machines, retaining the selected model and existing workloads. Redacted
+observations go to `build/live-evidence/` or `TEST_EVIDENCE_DIR`.
+
 ## NetBox, device and backend acceptance
 
 Record the installed NetBox and discovery-plugin versions before the live run.
@@ -70,7 +104,7 @@ region and repeated-tag filters against that installed version.
 Configure the built application with granted secrets and the existing remote
 write integration. Enroll an OPNsense device with a dedicated primary IPv4 and a
 known `snmp_auth` profile, then add a Cisco device. Verify `system,if_mib` metrics,
-original interface labels, `job="snmp/network"`, stable device instances and
+original interface labels, `job="snmp/network"`, management IP instances and
 actual site labels in Mimir. Change enrollment and confirm target withdrawal
 within a refresh cycle without a PID change.
 
@@ -85,6 +119,19 @@ restart Alloy, recover the endpoint and verify queued delivery. Refresh the buil
 charm while watching the PID, WAL directory and device labels. Record actual
 results; a source-level refresh test alone does not prove live continuity.
 
-See the [implementation record](network-monitoring-implementation.md) for what
-has actually run in this workspace. Interface enrichment and HA remain later
-milestones.
+## Current verification scope
+
+Validation on 2026-10-12 passed lint/format/type and dependency-provenance checks,
+324 unit tests and six native Alloy tests. Rebuilt Ubuntu 22.04/24.04 amd64
+artifacts were inspected for runtime sources, relation preservation and private
+input exclusions, then exercised against Mimir 3.2.1 and Loki 3.7.8 in a lab.
+Both bases passed collector/provider identity, secret rotation/withdrawal,
+logging validation and unchanged-argument refresh PID/start-time/WAL checks.
+Syslog ingestion retained 14 indexed labels and its auxiliary metadata.
+
+The synthetic SNMP target had no agent; its diagnostic `up=0` proves routing and
+delivery, not appliance authentication or interface counters. Real OPNsense/Cisco
+acceptance, installed NetBox/plugin behavior, Grafana browser checks and alert
+firing/runbooks still need verification. Interface enrichment and HA remain later
+milestones. Per-run logs, audit snapshots and implementation notes are local
+working records rather than maintained repository documentation.

@@ -30,8 +30,11 @@ jobs:
 
       - name: Run charm static tests
         run: |
-          uv sync --group dev
-          uv run tox -e format
+          uv sync --locked --group dev
           uv run tox -e lint
           uv run tox -e static
           uv run tox -e unit
+      - name: Verify native Alloy discovery, labels, secrets and WAL behavior
+        run: |
+          python3 tools/fetch_alloy.py --output "$RUNNER_TEMP/alloy/alloy-linux-amd64"
+          ALLOY_BINARY="$RUNNER_TEMP/alloy/alloy-linux-amd64" uv run tox -e binary

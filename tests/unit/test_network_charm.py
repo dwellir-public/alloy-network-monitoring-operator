@@ -119,6 +119,8 @@ def test_unavailable_secret_withdraws_network_but_keeps_local_metrics(runtime):
     assert "unavailable" in output.unit_status.message
     assert 'discovery.http "network_netbox"' not in config_path.read_text()
     assert 'prometheus.scrape "default"' in config_path.read_text()
+    assert 'target_label = "collector"' in config_path.read_text()
+    assert 'replacement = "lab"' in config_path.read_text()
     assert applied(output)["network_secret_files"] == {}
     assert not Path(previous["token"]).exists()
     assert calls == ["restart", "reload"]
@@ -138,6 +140,40 @@ def test_invalid_auth_rotation_preserves_working_generation(runtime, caplog):
     assert config_path.read_text() == applied(first)["last_good_config"]
     assert calls == ["restart"]
     assert "fake-secret-invalid" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("requested", "expected"),
+    [
+        ("debug", "debug"),
+        ("info", "info"),
+        ("warn", "warn"),
+        ("warning", "warn"),
+        ("error", "error"),
+        ("critical", "error"),
+    ],
+)
+def test_log_level_applies_by_reload_and_invalid_change_retains_generation(
+    runtime, requested, expected
+):
+    ctx, calls, config_path, _ = runtime
+    first = ctx.run(ctx.on.config_changed(), initial_state(**{"log-level": "debug"}))
+    output = ctx.run(
+        ctx.on.config_changed(), replace(first, config={**first.config, "log-level": requested})
+    )
+    assert isinstance(output.unit_status, testing.ActiveStatus)
+    assert f'level = "{expected}"' in config_path.read_text()
+    previous = config_path.read_text()
+    count = len(calls)
+    rejected = ctx.run(
+        ctx.on.config_changed(), replace(output, config={**output.config, "log-level": "invalid"})
+    )
+    assert isinstance(rejected.unit_status, testing.BlockedStatus)
+    assert rejected.unit_status.message.startswith("log-level must be")
+    assert config_path.read_text() == previous
+    assert applied(rejected)["last_good_config"] == applied(output)["last_good_config"]
+    assert len(calls) == count
+    assert calls == (["restart"] if expected == "debug" else ["restart", "reload"])
 
 
 def test_failed_reload_restores_files_state_and_can_retry(runtime, monkeypatch):
@@ -234,7 +270,8 @@ def test_network_alerts_use_existing_payload_and_device_scope(runtime):
         "NetworkCollectorDiskLow",
     }
     assert all(rule["labels"]["collector"] == "lab" for rule in rules)
-    assert "juju_application" not in json.dumps(rules)
+    assert all('juju_application="alloy-network-monitoring"' in rule["expr"] for rule in rules)
+    assert all(rule["labels"]["juju_application"] == "alloy-network-monitoring" for rule in rules)
 
 
 def test_override_preserves_referenced_managed_files(runtime):

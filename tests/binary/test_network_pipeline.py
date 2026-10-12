@@ -14,10 +14,18 @@ from urllib.request import urlopen
 import pytest
 
 import alloy
+from config_builder import ConfigBuilder, LogSourceGroup, MetricsScrapeJob, ScrapeTarget
 from network_monitoring import NetworkPipeline, NetworkSettings, render_network_blocks
 
 BINARY = os.environ.get("ALLOY_BINARY", "")
 pytestmark = pytest.mark.skipif(not BINARY, reason="Set ALLOY_BINARY to a tested Alloy executable")
+TOPOLOGY = {
+    "juju_model": "fixture-model",
+    "juju_model_uuid": "00000000-0000-4000-8000-000000000001",
+    "juju_application": "fixture-collector",
+    "juju_unit": "fixture-collector/0",
+    "juju_charm": "alloy-network-monitoring",
+}
 
 
 def device(device_id="123", **overrides):
@@ -137,7 +145,7 @@ def running_alloy(tmp_path, server):
         'prometheus.remote_write "metrics" {\n endpoint {\n'
         f'  url = "{server["url"]}/push"\n'
         + " }\n}\n"
-        + render_network_blocks(pipeline)
+        + render_network_blocks(pipeline, topology_labels=TOPOLOGY)
         + '\nprometheus.scrape "fixture_self" {\n'
         + f'  targets = [{{"__address__" = "{address}", "job" = "alloy"}}]\n'
         + '  scrape_interval = "1s"\n'
@@ -190,11 +198,12 @@ def test_dynamic_inventory_identity_and_failure_semantics(server, running_alloy)
     public = {key: value for key, value in target.items() if not key.startswith("__")}
     assert public == {
         "job": "snmp/network",
-        "instance": "netbox-device-123",
+        "instance": "127.0.0.2",
         "netbox_id": "123",
         "device": "router",
         "site": "home",
         "collector": "lab",
+        **TOPOLOGY,
     }
     assert target["__param_target"] == "127.0.0.2"
     assert target["__param_auth"] == "opnsense"
@@ -204,6 +213,22 @@ def test_dynamic_inventory_identity_and_failure_semantics(server, running_alloy)
     )
     assert any(header == "Bearer fixture-token" for _, header in server["requests"])
     wait_for(lambda: server["writes"])
+
+    server["inventory"] = [device(__meta_netbox_name="router-renamed")]
+    renamed = wait_for(
+        lambda: (result := targets(url)) and result[0]["device"] == "router-renamed" and result
+    )
+    assert renamed[0]["instance"] == "127.0.0.2"
+    assert renamed[0]["netbox_id"] == "123"
+
+    server["inventory"] = [
+        device(__meta_netbox_name="router-renamed", __meta_netbox_primary_ip4="127.0.0.3")
+    ]
+    selected = wait_for(
+        lambda: (result := targets(url)) and result[0]["instance"] == "127.0.0.3" and result
+    )
+    assert selected[0]["netbox_id"] == "123"
+    assert selected[0]["__param_target"] == "127.0.0.3"
 
     server["status"] = 500
     before = len(server["requests"])
@@ -243,6 +268,54 @@ def test_malformed_config_reload_retains_previous_pipeline(server, running_alloy
         alloy.reload(api_address=url.removeprefix("http://"))
     assert targets(url) == selected
     assert process.poll() is None
+
+
+def test_complete_collection_config_validates_with_collector_and_provider_topology(
+    server, running_alloy, tmp_path
+):
+    _, _, pipeline, _ = running_alloy
+    provider = {**TOPOLOGY, "juju_application": "source-app", "juju_unit": "source-app/0"}
+    rendered = ConfigBuilder(
+        loki_endpoints=[server["url"] + "/loki/api/v1/push"],
+        remote_write_endpoints=[server["url"] + "/push"],
+        metrics_scrape_jobs=[
+            MetricsScrapeJob("provider", [ScrapeTarget("127.0.0.1:9999", provider)])
+        ],
+        systemd_units=["alloy.service"],
+        journal_kernel=True,
+        journal_match_expressions=["SYSLOG_IDENTIFIER=fixture"],
+        enable_syslog_receivers=True,
+        topology_labels=TOPOLOGY,
+        log_source_groups=[
+            LogSourceGroup("source_app", provider, systemd_units=["fixture.service"])
+        ],
+        network_pipeline=pipeline,
+        log_level="warning",
+    ).build()
+    config = tmp_path / "all-collection-paths.alloy"
+    config.write_text(rendered)
+    result = subprocess.run([BINARY, "validate", str(config)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert 'level = "warn"' in rendered
+    provider_scrape = rendered.split('prometheus.scrape "provider" {', 1)[1].split("\n}\n", 1)[0]
+    assert 'juju_application = "source-app"' in provider_scrape
+    assert 'juju_application = "fixture-collector"' not in provider_scrape
+
+
+def test_host_journal_without_service_sources_has_resolvable_relabel_rules(server, tmp_path):
+    rendered = ConfigBuilder(
+        loki_endpoints=[server["url"] + "/loki/api/v1/push"],
+        remote_write_endpoints=[],
+        metrics_scrape_jobs=[],
+        systemd_units=[],
+        journal_kernel=True,
+        journal_match_expressions=["SYSLOG_IDENTIFIER=fixture"],
+        topology_labels=TOPOLOGY,
+    ).build()
+    config = tmp_path / "host-only.alloy"
+    config.write_text(rendered)
+    result = subprocess.run([BINARY, "validate", str(config)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
 
 
 def test_wal_replays_after_restart_with_collector_self_scraping(server, running_alloy):

@@ -169,6 +169,31 @@ def test_syslog_receivers_with_loki_use_remote_processor():
     assert 'target_label  = "syslog_facility"' in rendered
     assert 'target_label  = "syslog_proc_id"' in rendered
     assert 'target_label  = "connection_hostname"' in rendered
+    listeners = rendered.split('loki.source.syslog "receiver" {', 1)[1]
+    for label, value in TOPOLOGY.items():
+        assert listeners.count(f'{label} = "{value}"') == 2
+
+
+def test_external_scrapes_gain_collector_topology_and_partial_provider_identity_is_preserved():
+    rendered = _builder(
+        remote_write_endpoints=["http://mimir.invalid/push"],
+        metrics_scrape_jobs=[
+            MetricsScrapeJob("external", [ScrapeTarget("192.0.2.1:9100")]),
+            MetricsScrapeJob(
+                "provider",
+                [ScrapeTarget("192.0.2.2:9100", {"juju_application": "source-app"})],
+            ),
+        ],
+    ).build()
+    external = rendered.split('prometheus.scrape "external" {', 1)[1].split(
+        'prometheus.scrape "provider" {', 1
+    )[0]
+    for label, value in TOPOLOGY.items():
+        assert f'{label} = "{value}"' in external
+    provider = rendered.split('prometheus.scrape "provider" {', 1)[1]
+    assert 'juju_application = "source-app"' in provider
+    assert "juju_unit" not in provider
+    assert "juju_model" not in provider
 
 
 def test_loki_writer_renders_basic_auth_and_tls_config():
@@ -256,7 +281,7 @@ def test_journal_relabel_preserves_unit_identifier_and_priority_labels():
     assert 'target_label  = "severity"' in rendered
 
 
-def test_journal_kernel_renders_unlabeled_host_journal_source():
+def test_journal_kernel_renders_collector_topology():
     rendered = _builder(
         loki_endpoints=["http://10.0.0.20:3100/loki/api/v1/push"],
         journal_kernel=True,
@@ -265,7 +290,10 @@ def test_journal_kernel_renders_unlabeled_host_journal_source():
     assert 'loki.source.journal "host_journald" {' in rendered
     assert 'matches = "_TRANSPORT=kernel"' in rendered
     assert "relabel_rules = loki.relabel.journal.rules" in rendered
-    assert 'labels = {log_source = "journal"}' in rendered
+    host_section = rendered.split('loki.source.journal "host_journald" {', 1)[1]
+    assert 'log_source = "journal"' in host_section
+    for label, value in TOPOLOGY.items():
+        assert f'{label} = "{value}"' in host_section
     assert "forward_to = [loki.write.main.receiver]" in rendered
 
 
@@ -308,4 +336,5 @@ def test_host_journal_source_drops_without_loki_relation():
     host_section = rendered.split('loki.source.journal "host_journald_0" {', 1)[1].split(
         'loki.process "juju" {', 1
     )[0]
-    assert "juju_model" not in host_section
+    for label, value in TOPOLOGY.items():
+        assert f'{label} = "{value}"' in host_section

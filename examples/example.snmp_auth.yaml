@@ -1,3 +1,10 @@
+# SNMPv3 authentication template for alloy-network-monitoring.
+# Copy this file outside the checkout and replace the placeholder credentials.
+# Upload it as the snmp-yaml field of the secret referenced by snmp-auth.
+# Each NetBox device's snmp_auth custom field selects a profile name below.
+# Profiles can be shared across devices or defined separately for each device.
+# Usernames and authentication/privacy protocols must match device settings.
+
 auths:
   opnsense:
     version: 3

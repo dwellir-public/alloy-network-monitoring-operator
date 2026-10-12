@@ -20,7 +20,7 @@ secret with a `token` field. The `snmp-auth` config option references a secret
 with a `snmp-yaml` field containing the complete `auths` YAML mapping. These are
 secret references in config, rather than credentials.
 
-Copy the [two-profile example](../examples/snmp-auth.yaml) outside the checkout,
+Copy the [SNMPv3 secret template](../examples/example.snmp_auth.yaml) outside the checkout,
 replace its placeholders with the credentials configured on your devices, and
 save the NetBox token in a separate local file. Juju's
 [file input syntax](https://documentation.ubuntu.com/juju/3.6/reference/juju-cli/list-of-juju-cli-commands/add-secret/)
@@ -28,7 +28,7 @@ reads those files without placing credentials in command arguments:
 
 ```bash
 juju add-secret netbox-token 'token#file=./netbox-token.txt'
-juju add-secret snmp-auth 'snmp-yaml#file=./snmp-auth.yaml'
+juju add-secret snmp-auth 'snmp-yaml#file=./snmp_auth.yaml'
 
 # Substitute the secret IDs returned by the two commands above.
 juju grant-secret secret:NETBOX-ID alloy-network-monitoring
@@ -63,6 +63,16 @@ v1 tokens. A private CA can be supplied through `netbox-ca`, referencing a
 granted secret with a `ca-pem` certificate bundle. Certificate verification
 remains enabled.
 
+The secret's `token` field contains only the raw token, without a `Bearer` or
+`Token` prefix. The charm adds the configured authentication scheme. For a
+private NetBox CA:
+
+```bash
+juju add-secret netbox-ca 'ca-pem#file=./netbox-ca.pem'
+juju grant-secret secret:CA-ID alloy-network-monitoring
+juju config alloy-network-monitoring netbox-ca=secret:CA-ID
+```
+
 ## Multiple authentications
 
 One secret supports up to 128 named SNMPv3 profiles. Each NetBox device's
@@ -82,7 +92,7 @@ reference:
 
 ```bash
 juju update-secret secret:NETBOX-ID 'token#file=./netbox-token.txt'
-juju update-secret secret:SNMP-ID 'snmp-yaml#file=./snmp-auth.yaml'
+juju update-secret secret:SNMP-ID 'snmp-yaml#file=./snmp_auth.yaml'
 ```
 
 The charm consumes the latest granted revision on `secret-changed` and
@@ -104,12 +114,54 @@ filters are checked again in Alloy. Region filtering relies on NetBox.
 Raw metadata and incoming internal routing labels are discarded before the
 embedded exporter constructs its own scrape targets.
 
-Samples use `job="snmp/network"`, `instance="netbox-device-<id>"`, `netbox_id`,
-`device`, actual `site`, and `collector`. Device counters are not stamped with
-the collector's Juju ownership. Original `ifName`, `ifDescr`, `ifAlias` and
+Samples use `job="snmp/network"`, `instance` set to the target's primary IPv4
+(for example, `10.99.100.254`), `netbox_id`, `device`, actual `site`, and
+`collector`. SNMP samples also carry `juju_model`, `juju_model_uuid`,
+`juju_application`, `juju_unit` and `juju_charm` for the collector. These identify
+where collection happened; NetBox labels identify the device. Original `ifName`, `ifDescr`, `ifAlias` and
 `ifIndex` labels remain exporter observations. SNMP diagnostic metrics are kept.
 Local host and Alloy self metrics retain existing Juju topology and gain the
 collector label while the network pipeline is configured.
+
+Incoming syslog and host journal logs receive collector Juju topology too,
+while retaining their original hostname, address and journal fields. Related
+workload metrics and logs preserve the provider's Juju identity. For an external
+scrape without provider topology, collector topology supplies the context.
+Partial provider topology is retained as supplied; unknown fields are not
+filled with a different application's identity. A full `config-override` owns
+its label policy.
+
+Syslog retains device hostname/address, application, facility, level/severity,
+protocol and collector topology as indexed labels. Component, receiver
+hostname/address, connection hostname and process ID move to structured metadata
+to fit Loki's default 15-label limit. They remain available with LogQL pipeline
+filters, for example `{log_source="remote_syslog"} | syslog_proc_id="123"`.
+The explicit `service_name="loki.source.syslog"` retains the previous inferred
+service name. This requires a Loki backend that accepts structured metadata;
+the current lab supports it. See [Loki limits](https://grafana.com/docs/loki/latest/configure/)
+and [Alloy structured metadata](https://grafana.com/docs/alloy/latest/reference/components/loki/loki.process/).
+
+`netbox_id` remains the inventory identity when a device is renamed or its
+address changes. `instance` follows address changes. Updating from the original
+`netbox-device-<id>` instance convention creates new metric series; historical
+samples keep their previous labels.
+Adding Juju labels also creates new series/streams; earlier history retains the
+previous label sets.
+
+## Logging and the management listener
+
+`log-level` controls generated Alloy logging: `debug`, `info`, `warn` or `error`.
+The earlier `warning` and `critical` values remain accepted as aliases for
+`warn` and `error`. Invalid settings block the candidate while retaining the
+running configuration. Logging changes use reload rather than service restart.
+See [Alloy's logging reference](https://grafana.com/docs/alloy/latest/reference/config-blocks/logging/).
+
+Fresh deployments default to `--server.http.listen-addr=127.0.0.1:6987`.
+Explicit `custom_args` are honored. Change that setting deliberately if remote
+management is required. Changing runtime arguments requires a service restart,
+which the charm signals in its log and status; changing the listener default
+can therefore restart an older deployment during normal configuration
+reconciliation. `upgrade-charm` itself preserves the running service.
 
 ## Failure and buffering behavior
 
@@ -127,6 +179,10 @@ collector label while the network pipeline is configured.
 | Network monitoring disabled | Network components and credentials are withdrawn after a successful apply |
 | `config-override` set | Automatic discovery/secret management is bypassed; the override owns its configuration; existing managed files explicitly referenced by it are retained |
 
+When network collection is withdrawn while enabled, local self metrics retain
+the last applied collector label. This keeps collector-health alerts scoped to
+the still-running service while the missing-target alert reports withdrawal.
+
 Discovery refresh defaults to `60s`, device scraping to `30s`, and timeout to
 `15s`. Use `netbox-refresh-interval`, `snmp-scrape-interval` and
 `snmp-scrape-timeout` to tune them; timeout must be shorter than the interval.
@@ -143,10 +199,30 @@ disk space using the existing `alert_rules` transport. The downstream ruler must
 already accept and evaluate that transport. Collector-loss alerts need backend
 evaluation because an unreachable collector cannot send its own health signal.
 
-The management listener retains the existing default; restrict its binding with
-`custom_args="--server.http.listen-addr=127.0.0.1:6987"` where remote access is
-unnecessary. Self scraping follows the configured listener and the debugging
+Self scraping follows the configured management listener and the debugging
 listener when debugging is enabled.
+
+## Troubleshoot missing SNMP metrics
+
+Check `up{job="snmp/network"}` in the metrics backend, then
+`{job="snmp/network", __name__=~"ifHC.*"}` for interface counters. A healthy
+Alloy component or active Juju unit alone does not prove discovery or successful
+SNMP collection.
+
+- **No SNMP targets:** check discovery errors in the Alloy service journal,
+  DNS resolution from the collector machine, NetBox certificate trust, filters,
+  primary IPv4 and the device's `snmp_auth` profile. Workstation hostname
+  resolution does not configure the collector's resolver.
+- **Secret validation error:** NetBox requires `token`; SNMP profiles require
+  `snmp-yaml`; the CA bundle requires `ca-pem`. Check field names and grants
+  without copying credentials into logs or config.
+- **Targets with `up=0`:** confirm device reachability and SNMPv3 user, security
+  level, authentication/privacy protocols and passphrases. Authentication digest
+  errors indicate a mismatch; compare the device settings with its selected
+  profile.
+- **`up=1` but missing counters:** check `scrape_samples_scraped` and the device's
+  support for the embedded `system,if_mib` modules. Keep device/interface labels
+  when querying the returned counters.
 
 ## Release and acceptance
 
@@ -158,7 +234,7 @@ configuration or credential event applies changed settings.
 
 Plugin installation, NetBox/plugin versions, real OPNsense/Cisco SNMP behavior,
 Mimir ingestion, persistent service storage and live charm refresh require a
-nonproduction acceptance run. See [verification instructions](build-test-deploy.md)
-and the [implementation record](network-monitoring-implementation.md).
+nonproduction acceptance run. See the
+[verification instructions and current scope](build-test-deploy.md).
 Interface enrichment, custom vendor modules, HA and persistent discovery
 snapshots remain subsequent milestones.

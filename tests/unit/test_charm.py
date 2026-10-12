@@ -527,7 +527,7 @@ def test_journal_kernel_renders_host_journal_source(monkeypatch):
     assert "forward_to = [loki.write.main.receiver]" in rendered
 
 
-def test_journal_match_expressions_render_without_juju_topology(monkeypatch):
+def test_journal_match_expressions_render_with_collector_topology(monkeypatch):
     ctx = testing.Context(AlloyCharm)
     seen = {}
     monkeypatch.setattr("charm.alloy.ensure_config_dir_permissions", lambda *_: None)
@@ -566,7 +566,8 @@ def test_journal_match_expressions_render_without_juju_topology(monkeypatch):
     host_section = rendered.split('loki.source.journal "host_journald_0" {', 1)[1].split(
         'loki.process "juju" {', 1
     )[0]
-    assert "juju_model" not in host_section
+    assert 'juju_application = "alloy-network-monitoring"' in host_section
+    assert 'juju_unit = "alloy-network-monitoring/0"' in host_section
 
 
 def test_syslog_receiver_relation_publishes_ready_receiver(monkeypatch):
