@@ -303,9 +303,17 @@ def _rule(
     return "  rule {\n" + "\n".join(fields) + "\n  }"
 
 
-def render_network_blocks(pipeline: NetworkPipeline) -> str:
+def render_network_blocks(
+    pipeline: NetworkPipeline, *, topology_labels: Mapping[str, str] | None = None
+) -> str:
     """Render discovery, explicit inventory normalization, SNMP export and scraping."""
     settings = pipeline.settings
+    topology = {
+        key: value
+        for key, value in (topology_labels or {}).items()
+        if key in {"juju_model", "juju_model_uuid", "juju_application", "juju_unit", "juju_charm"}
+        and value
+    }
     rules = [
         _rule(source="__meta_netbox_id", action="keep", regex="[1-9][0-9]*"),
         _rule(source="__meta_netbox_name", action="keep", regex=".+"),
@@ -388,8 +396,13 @@ def render_network_blocks(pipeline: NetworkPipeline) -> str:
             'discovery.relabel "network_scrape" {',
             "  targets = prometheus.exporter.snmp.network.targets",
             _rule(target="job", replacement="snmp/network"),
-            _rule(source="netbox_id", target="instance", replacement="netbox-device-${1}"),
-            _rule(action="labelkeep", regex="__.*|job|instance|netbox_id|device|site|collector"),
+            _rule(source="__param_target", target="instance"),
+            *(_rule(target=key, replacement=topology[key]) for key in sorted(topology)),
+            _rule(
+                action="labelkeep",
+                regex="__.*|job|instance|netbox_id|device|site|collector"
+                + ("|" + "|".join(sorted(topology)) if topology else ""),
+            ),
             "}",
             "",
             'prometheus.scrape "network_snmp" {',

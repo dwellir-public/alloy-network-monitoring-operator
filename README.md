@@ -10,10 +10,11 @@ each device selects a profile through its NetBox `snmp_auth` custom field.
 `netbox-site`, `netbox-region` and `netbox-tags` are independently optional.
 
 Start with the [network monitoring operator guide](docs/network-monitoring.md),
-the [two-profile secret example](examples/snmp-auth.yaml), and the
+the [SNMPv3 secret template](examples/example.snmp_auth.yaml), and the
 [build and verification instructions](docs/build-test-deploy.md).
-The [implementation record](docs/network-monitoring-implementation.md) distinguishes
-local validation from the outstanding live lab acceptance checks.
+See [DEVELOPING.md](DEVELOPING.md) for dependency management and
+the [architecture guide](docs/charm-architecture.md) for configuration and
+service lifecycle behavior.
 
 
 Supported bases:
@@ -396,10 +397,10 @@ juju config alloy-network-monitoring alloy-livedebugging=false
 Optional: set your baseline custom args that should be restored after disabling:
 
 ```bash
-juju config alloy-network-monitoring custom_args="--server.http.listen-addr=0.0.0.0:6987"
+juju config alloy-network-monitoring custom_args="--server.http.listen-addr=127.0.0.1:6987"
 ```
 
-## Enable syslog receivers (phase 6)
+## Enable syslog receivers
 
 Enable TCP+UDP syslog listeners on port `1514`:
 
@@ -412,7 +413,10 @@ Behavior:
 - Applies relabel rules for remote syslog metadata.
 - Routes remote syslog through a dedicated `loki.process "remote_syslog"` stage before
   `loki.write.main`.
-- Does not add Juju topology labels to remote syslog.
+- Adds collector Juju topology labels while retaining the sender's identity.
+- Stores auxiliary receiver/connection/process fields as structured metadata;
+  Loki must accept that metadata. See the
+  [label guide](docs/network-monitoring.md#eligibility-and-labels).
 - If there is no `send-loki-logs` relation, syslog is dropped (`forward_to = []`).
 
 ### Optional remote syslog drop controls
@@ -558,7 +562,7 @@ These options create an additional host journal source in Alloy.
 Behavior:
 
 - `systemd-units` logs still flow through the Juju-labeled log pipeline
-- kernel/raw host journal logs do not get `juju_*` labels
+- kernel/raw host journal logs carry the collector's `juju_*` labels
 - if there is no `send-loki-logs` relation, the broader host journal path is
   dropped just like the existing log pipeline
 
@@ -574,7 +578,7 @@ What happens:
 
 - Alloy adds `_TRANSPORT=kernel` to a broader host journal source
 - this is intended to capture kernel log traffic similar to `dmesg`
-- these entries are forwarded to Loki without Juju topology labels
+- these entries are forwarded to Loki with collector Juju topology labels
 
 ### `journal-match-expressions`
 
@@ -608,7 +612,7 @@ What happens:
 
 - `ssh.service` and `snap.lxd.daemon.service` logs still keep Juju topology labels
 - kernel transport logs are collected through the separate host journal path
-- the host journal path remains unlabeled by Juju topology
+- the host journal path carries collector Juju topology labels
 
 Example: monitor an LXD host for kernel, LXD, and audit-style host messages
 
@@ -624,8 +628,8 @@ What happens:
 - kernel transport logs are collected through the broader host journal path
 - host messages emitted with `SYSLOG_IDENTIFIER=lxd` or `SYSLOG_IDENTIFIER=audit`
   are collected through the broader host journal path
-- the broader host journal path does not add `juju_*` labels, so these entries
-  should be treated as host-scoped logs rather than Juju workload-scoped logs
+- the broader host journal path carries collector `juju_*` labels; related
+  workload logs retain their provider's topology
 
 ### Verification
 

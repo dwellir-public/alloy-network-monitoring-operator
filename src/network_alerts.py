@@ -1,11 +1,22 @@
 """Collector-scoped Prometheus rules carried by the existing rule transport."""
 
 import json
+from collections.abc import Mapping
 
 
-def network_alert_groups(collector: str, owner: str) -> list[dict[str, object]]:
-    """Build rules without assigning collector Juju ownership to device metrics."""
-    scope = f"collector={json.dumps(collector)}"
+def network_alert_groups(
+    collector: str, owner: str, *, topology_labels: Mapping[str, str] | None = None
+) -> list[dict[str, object]]:
+    """Build collector-scoped rules with the collector's Juju provenance."""
+    topology = topology_labels or {}
+    scope = ",".join(
+        [f"collector={json.dumps(collector)}"]
+        + [
+            f"{key}={json.dumps(topology[key])}"
+            for key in ("juju_model_uuid", "juju_application")
+            if topology.get(key)
+        ]
+    )
     device = f'job="snmp/network",{scope}'
     local = f'job="alloy",{scope}'
     rules = [
@@ -45,7 +56,11 @@ def network_alert_groups(collector: str, owner: str) -> list[dict[str, object]]:
                     "alert": name,
                     "expr": expression,
                     "for": duration,
-                    "labels": {"severity": "warning", "collector": collector},
+                    "labels": {
+                        **(topology_labels or {}),
+                        "severity": "warning",
+                        "collector": collector,
+                    },
                     "annotations": {"summary": summary},
                 }
                 for name, expression, duration, summary in rules

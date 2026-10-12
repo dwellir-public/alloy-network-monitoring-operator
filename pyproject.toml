@@ -78,7 +78,7 @@ exclude = ["src/alert_rules.py"]
 max-complexity = 10
 
 [tool.codespell]
-skip = "build,lib,venv,icon.svg,.tox,.git,.mypy_cache,.ruff_cache,.coverage"
+skip = "build,lib,venv,icon.svg,.tox,.git,.local-docs,.mypy_cache,.ruff_cache,.coverage,snmp_auth.yaml,snmp-auth.yaml,netbox_token.txt,netbox-token.txt,manual_metrics_jobs.yaml"
 
 [tool.pyright]
 venvPath = "."

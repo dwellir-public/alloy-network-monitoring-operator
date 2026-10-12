@@ -83,7 +83,8 @@ config:
       description: |
         Configures the log level of the Alloy process.
 
-        Acceptable values are: "info", "debug", "warning", "error" and "critical"
+        Acceptable values are "debug", "info", "warn" and "error".
+        Compatibility aliases "warning" and "critical" map to "warn" and "error".
       default: "info"
       type: string
     config-override:
@@ -102,7 +103,7 @@ config:
       description: |
         Include host kernel journal messages by adding `_TRANSPORT=kernel` to
         the broader host journal capture path. These logs are forwarded to Loki
-        without Juju topology labels.
+        with collector Juju topology labels.
       type: boolean
       default: false
     journal-match-expressions:
@@ -110,13 +111,14 @@ config:
         Newline-separated raw journald match expressions to include in the
         broader host journal capture path (for example `SYSLOG_IDENTIFIER=lxd`).
         These expressions are passed through without validation and forwarded to
-        Loki without Juju topology labels.
+        Loki with collector Juju topology labels.
       type: string
       default: ""
     custom_args:
       description: |
-        Custom arguments for the Alloy service.
-      default: "--server.http.listen-addr=0.0.0.0:6987"
+        Custom arguments for the Alloy service. The HTTP management listener
+        defaults to loopback; set an explicit address for remote access.
+      default: "--server.http.listen-addr=127.0.0.1:6987"
       type: string
     alloy-livedebugging:
       description: |
@@ -129,7 +131,7 @@ config:
       description: |
         Enable Alloy syslog listeners for remote syslog ingestion. When true,
         Alloy listens on both TCP and UDP port 1514 and forwards incoming logs
-        directly to Loki (without Juju topology relabeling).
+        directly to Loki with collector Juju topology and syslog origin labels.
       default: false
       type: boolean
     syslog-drop-access-logs:

@@ -22,9 +22,38 @@ DEFAULT_PACKAGE_CONFIG_BACKUP_PATH = os.path.join(
 DEFAULT_CONFIG_BACKUP_PATH = os.path.join(DEFAULT_CONFIG_DIR, "config.alloy.bak")
 REMOTE_WRITE_COMPONENT_NAME = "metrics"
 REMOTE_WRITE_MAX_KEEPALIVE = "30m"
+SYSLOG_STRUCTURED_METADATA = (
+    "component",
+    "connection_hostname",
+    "receiver_hostname",
+    "receiver_ip",
+    "syslog_proc_id",
+)
 DEFAULT_SYSLOG_ACCESS_DROP_EXPRESSIONS = [
     '.*"(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS|CONNECT|TRACE) .* HTTP/.*"',
 ]
+
+
+class InvalidLogLevelError(ValueError):
+    """Reject unsupported logging levels without echoing configuration."""
+
+
+def normalize_log_level(value: str) -> str:
+    """Preserve documented aliases while using Alloy's supported log levels."""
+    levels = {
+        "debug": "debug",
+        "info": "info",
+        "warn": "warn",
+        "warning": "warn",
+        "error": "error",
+        "critical": "error",
+    }
+    try:
+        return levels[value.strip().lower()]
+    except (KeyError, AttributeError):
+        raise InvalidLogLevelError(
+            "log-level must be debug, info, warn, warning, error or critical"
+        ) from None
 
 
 @dataclass(frozen=True)
@@ -92,6 +121,8 @@ class ConfigBuilder:
         log_source_groups: list[LogSourceGroup] | None = None,
         network_pipeline: NetworkPipeline | None = None,
         self_metrics_address: str = "127.0.0.1:6987",
+        log_level: str = "info",
+        collector_id: str = "",
     ):
         self._loki_endpoints = loki_endpoints
         self._remote_write_endpoints = remote_write_endpoints
@@ -111,6 +142,10 @@ class ConfigBuilder:
         self._log_source_groups = log_source_groups or []
         self._network_pipeline = network_pipeline
         self._self_metrics_address = self_metrics_address
+        self._log_level = normalize_log_level(log_level)
+        self._collector_id = (
+            network_pipeline.settings.collector if network_pipeline else collector_id
+        )
 
     @staticmethod
     def _normalize_endpoints(
@@ -128,7 +163,14 @@ class ConfigBuilder:
         blocks.extend(self._render_metrics_blocks())
         blocks.extend(self._render_log_blocks())
         if self._network_pipeline and self._remote_write_endpoints:
-            blocks.extend(["", render_network_blocks(self._network_pipeline)])
+            blocks.extend(
+                [
+                    "",
+                    render_network_blocks(
+                        self._network_pipeline, topology_labels=self._topology_labels
+                    ),
+                ]
+            )
         return "\n".join(blocks).rstrip() + "\n"
 
     def _render_base_blocks(self) -> list[str]:
@@ -157,7 +199,7 @@ class ConfigBuilder:
             blocks.extend([self._render_live_debugging(), ""])
         if self._has_log_pipeline():
             blocks.extend(["// LOGS -> LOKI (Juju topology labels)", ""])
-        if self._has_labeled_log_sources():
+        if self._has_labeled_log_sources() or self._has_host_journal_source():
             blocks.extend([self._render_journal_relabel(), ""])
         for group in self._effective_log_source_groups():
             blocks.extend([self._render_group_processor(group), ""])
@@ -185,7 +227,7 @@ class ConfigBuilder:
         return "\n".join(
             [
                 "logging {",
-                '  level = "warn"',
+                f"  level = {json.dumps(self._log_level)}",
                 "}",
             ]
         )
@@ -202,12 +244,12 @@ class ConfigBuilder:
 
     def _render_local_metrics_relabel(self) -> str:
         rules = []
-        if self._network_pipeline:
+        if self._collector_id:
             rules.extend(
                 [
                     "  rule {",
                     '    target_label = "collector"',
-                    f"    replacement = {json.dumps(self._network_pipeline.settings.collector)}",
+                    f"    replacement = {json.dumps(self._collector_id)}",
                     "  }",
                     "",
                 ]
@@ -334,11 +376,17 @@ class ConfigBuilder:
                 [
                     "    {",
                     f'      __address__ = "{target.address}",',
-                    *self._render_target_labels(target.labels),
+                    *self._render_target_labels(self._target_topology(target.labels)),
                     "    },",
                 ]
             )
         return rendered
+
+    def _target_topology(self, labels: dict[str, str]) -> dict[str, str]:
+        """Add collector context to external targets, preserving provider ownership."""
+        if any(labels.get(key) for key in self._topology_label_order()):
+            return labels
+        return {**self._topology_labels, **labels}
 
     def _render_target_labels(self, labels: dict[str, str]) -> list[str]:
         lines = []
@@ -376,7 +424,10 @@ class ConfigBuilder:
                         f'loki.source.journal "{component_name}" {{',
                         f'  matches = "{match}"',
                         "  relabel_rules = loki.relabel.journal.rules",
-                        '  labels = {log_source = "journal"}',
+                        "  labels = "
+                        + self._render_inline_labels(
+                            {**self._topology_labels, "log_source": "journal"}
+                        ),
                         forward_to,
                         "}",
                     ]
@@ -465,6 +516,14 @@ class ConfigBuilder:
     def _render_syslog_source(self) -> str:
         receiver_hostname = self._receiver_hostname or "unknown"
         receiver_ip = self._receiver_ip or "unknown"
+        labels = {
+            **self._topology_labels,
+            "component": "loki.source.syslog",
+            "service_name": "loki.source.syslog",
+            "log_source": "remote_syslog",
+            "receiver_hostname": receiver_hostname,
+            "receiver_ip": receiver_ip,
+        }
         forward_to = (
             "  forward_to = [loki.process.remote_syslog.receiver]"
             if self._loki_endpoints
@@ -477,17 +536,13 @@ class ConfigBuilder:
                 "",
                 "  listener {",
                 '    address = ":1514"',
-                '    labels  = {component = "loki.source.syslog", protocol = "tcp", '
-                f'log_source = "remote_syslog", receiver_hostname = "{receiver_hostname}", '
-                f'receiver_ip = "{receiver_ip}"' + "}",
+                "    labels = " + self._render_inline_labels({**labels, "protocol": "tcp"}),
                 "  }",
                 "",
                 "  listener {",
                 '    address  = ":1514"',
                 '    protocol = "udp"',
-                '    labels   = {component = "loki.source.syslog", protocol = "udp", '
-                f'log_source = "remote_syslog", receiver_hostname = "{receiver_hostname}", '
-                f'receiver_ip = "{receiver_ip}"' + "}",
+                "    labels = " + self._render_inline_labels({**labels, "protocol": "udp"}),
                 "  }",
                 "",
                 forward_to,
@@ -502,6 +557,16 @@ class ConfigBuilder:
 
     def _render_remote_syslog_processor(self) -> str:
         lines = ['loki.process "remote_syslog" {']
+        lines.extend(
+            [
+                "  stage.structured_metadata {",
+                "    values = {",
+                *(f'      {key} = "",' for key in SYSLOG_STRUCTURED_METADATA),
+                "    }",
+                "  }",
+                "",
+            ]
+        )
         for expression in self._effective_syslog_drop_expressions():
             lines.extend(
                 [
@@ -564,6 +629,11 @@ class ConfigBuilder:
             f"{indent}{self._render_key(key)} = {json.dumps(labels[key])},"
             for key in sorted(labels)
         ]
+
+    def _render_inline_labels(self, labels: dict[str, str]) -> str:
+        """Render a stable, safely quoted inline label map."""
+        fields = (f"{self._render_key(key)} = {json.dumps(labels[key])}" for key in sorted(labels))
+        return "{" + ", ".join(fields) + "}"
 
     def _render_loki_writer(self) -> str:
         if not self._loki_endpoints:
