@@ -35,9 +35,4 @@ dist/
 .worktrees/
 .local-docs/
 
-# Local operator inputs; public placeholder examples live under examples/.
-/snmp_auth.yaml
-/snmp-auth.yaml
-/netbox_token.txt
-/netbox-token.txt
-/manual_metrics_jobs.yaml
+personal_configs/*

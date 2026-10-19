@@ -60,6 +60,7 @@ from network_alerts import device_alert_groups, network_alert_groups, network_lo
 from network_monitoring import (
     NetworkMonitoringError,
     NetworkPipeline,
+    parse_location_labels,
     parse_netbox_token,
     parse_network_settings,
     parse_snmp_authentications,
@@ -173,6 +174,7 @@ class AlloyCharm(ops.CharmBase):
             network_feature_config={},
         )
         self._network_pipeline: NetworkPipeline | None = None
+        self._location_labels: dict[str, str] = {}
         self._network_features = NetworkAlertSettings()
         self._network_status: ops.StatusBase | None = None
         self._staged_secrets: SecretFiles | None = None
@@ -1141,6 +1143,11 @@ class AlloyCharm(ops.CharmBase):
         try:
             alloy.ensure_config_dir_permissions(str(Path(DEFAULT_CONFIG_PATH).parent))
             self._prepare_network_pipeline()
+            self._location_labels = (
+                {}
+                if str(self.config.get("config-override", "")).strip()
+                else parse_location_labels(self.config)
+            )
             self._network_features = (
                 NetworkAlertSettings()
                 if str(self.config.get("config-override", "")).strip()
@@ -1396,6 +1403,7 @@ class AlloyCharm(ops.CharmBase):
             network_pipeline=self._network_pipeline,
             self_metrics_address=self._self_metrics_address(),
             syslog_parsers=self._network_features.parsers,
+            location_labels=self._location_labels,
             log_level=str(self.config.get("log-level", "info")),
             collector_id=(
                 self._stored.last_network_collector

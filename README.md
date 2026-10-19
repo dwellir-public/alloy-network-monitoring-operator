@@ -182,6 +182,27 @@ behavior depends on the installed NetBox version.
 For site, region and tag placeholders, use the corresponding NetBox **slugs**,
 which can differ from their display names.
 
+Configured `netbox-site` and `netbox-region` also add default **`site`** and
+**`region`** labels to all metrics and logs forwarded by the generated
+configuration. This includes SNMP, manual scrape jobs, host/self metrics,
+journal/file logs and received syslog. Existing source labels take precedence;
+for example, SNMP keeps its discovered site. An empty option adds no label.
+These defaults also work with `network-monitoring-enabled=false`, so a
+syslog-only application needs no NetBox credentials to use them.
+
+The configured region describes the collection scope, even when NetBox includes
+descendant regions; it does not claim each device belongs directly to that
+region. Setting, changing or clearing the defaults creates new metric series
+and log streams; historical data keeps its existing labels. For example:
+
+```promql
+up{job="snmp/network", site="<site-name>", region="<region-name>"}
+```
+
+```logql
+{log_source="remote_syslog", site="<site-name>", region="<region-name>"}
+```
+
 The default authentication scheme is `Bearer` for NetBox v2 tokens; use
 `netbox-auth-scheme=Token` for v1 tokens. The charm adds this prefix itself.
 
@@ -300,6 +321,12 @@ metadata. For example:
 {log_source="remote_syslog"} | event_vendor="opnsense" | event_action="block"
 {log_source="remote_syslog"} | event_vendor="cisco" | event_type="interface_state"
 ```
+
+When both location defaults are set, syslog transport `protocol` moves to
+structured metadata to keep streams within Loki's default 15-label limit. Query
+it with `{log_source="remote_syslog"} | protocol="udp"`. Device identity remains
+available as `syslog_hostname` and `source_ip`; the charm does not infer a NetBox
+`device` label for logs.
 
 Set `syslog-parsers=""` to disable body parsing while continuing to receive logs.
 Set `enable-syslogreceivers=false` to disable reception. Existing drop expressions
@@ -549,8 +576,8 @@ below mean the option is unset. YAML examples above are passed as string values.
 | `snmp-auth` | String | Empty | Granted secret reference with a `snmp-yaml` field. Required when enabled. |
 | `netbox-auth-scheme` | String | `Bearer` | `Bearer` or `Token`. |
 | `netbox-ca` | String | Empty | Optional `ca-pem` secret for a certificate chain not already trusted by the collector. Publicly trusted certificates need none. |
-| `netbox-site` | String | Empty | Optional exact site slug. |
-| `netbox-region` | String | Empty | Optional region slug, passed to NetBox. |
+| `netbox-site` | String | Empty | Optional exact site slug and default `site` label for forwarded metrics/logs. Existing source labels take precedence. |
+| `netbox-region` | String | Empty | Optional region filter and default `region` label for forwarded metrics/logs. Existing source labels take precedence. |
 | `netbox-tags` | String | Empty | Optional comma-separated tag slugs; all must match. |
 | `netbox-status` | String | `active` | Device status slug; empty includes all statuses. |
 | `collector-id` | String | Empty | Required name for the collection scope, emitted as the `collector` metric/rule label; it does not filter devices. |

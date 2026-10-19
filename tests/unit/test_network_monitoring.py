@@ -12,6 +12,7 @@ from config_builder import ConfigBuilder
 from network_monitoring import (
     NetworkMonitoringError,
     NetworkPipeline,
+    parse_location_labels,
     parse_netbox_token,
     parse_network_settings,
     parse_snmp_authentications,
@@ -79,6 +80,30 @@ def test_disabled_override_and_empty_status():
         is None
     )
     assert not urlsplit(settings(**{"netbox-status": ""}).discovery_url).query
+
+
+@pytest.mark.parametrize(
+    "config, expected",
+    [
+        ({}, {}),
+        ({"netbox-site": "", "netbox-region": ""}, {}),
+        ({"netbox-site": "site-one"}, {"site": "site-one"}),
+        ({"netbox-region": "region-one"}, {"region": "region-one"}),
+        (
+            {"netbox-site": " site-one ", "netbox-region": "region-one"},
+            {"site": "site-one", "region": "region-one"},
+        ),
+    ],
+)
+def test_location_defaults_do_not_require_network_monitoring(config, expected):
+    assert parse_location_labels(config) == expected
+
+
+@pytest.mark.parametrize("key", ["netbox-site", "netbox-region"])
+def test_location_defaults_reject_invalid_slugs_without_echoing_input(key):
+    with pytest.raises(NetworkMonitoringError, match=f"{key} must be a NetBox slug") as error:
+        parse_location_labels({key: "invalid/private-value"})
+    assert "private-value" not in str(error.value)
 
 
 @pytest.mark.parametrize(

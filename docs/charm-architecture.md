@@ -42,6 +42,14 @@ context, while partial provider topology is preserved without invented fields.
 Local host and Alloy self metrics retain collector Juju topology. Self metrics
 keep the last applied collector label during secret withdrawal.
 
+Configured `netbox-site`/`netbox-region` slugs become optional external-label
+defaults on the shared metric and log writers. Existing source labels retain
+precedence. This also applies when managed NetBox/SNMP collection is disabled;
+the slugs then label the collection scope without performing discovery. When
+both defaults are present, syslog transport protocol becomes structured metadata
+to preserve the default Loki label budget. Empty defaults leave existing streams
+unchanged; a complete configuration override retains its own label policy.
+
 The existing v3 rule pipeline continues to validate, cache and forward owned
 Prometheus/Loki artifacts. [network_alerts.py](../src/network_alerts.py) adds
 collector-scoped Prometheus groups and optional parsed-event Loki groups through

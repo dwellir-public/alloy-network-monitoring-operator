@@ -263,6 +263,62 @@ def test_secrets_and_multiple_profiles_never_enter_config_or_state(runtime, capl
         assert secret not in caplog.text
 
 
+@pytest.mark.parametrize(
+    "location",
+    [
+        {"netbox-site": "site-one"},
+        {"netbox-region": "region-one"},
+        {"netbox-site": "site-one", "netbox-region": "region-one"},
+    ],
+)
+@pytest.mark.parametrize("network_enabled", [False, True])
+def test_location_labels_apply_and_can_be_removed(runtime, monkeypatch, location, network_enabled):
+    ctx, calls, config_path, _ = runtime
+    monkeypatch.setattr(AlloyCharm, "_loki_endpoint_urls", lambda _: ["http://loki/push"])
+    config = {"enable-syslogreceivers": True, **location}
+    state = initial_state(**config) if network_enabled else testing.State(config=config)
+    first = ctx.run(ctx.on.config_changed(), state)
+    assert isinstance(first.unit_status, testing.ActiveStatus)
+    rendered = config_path.read_text()
+    for option, value in location.items():
+        assert rendered.count(f'{option.removeprefix("netbox-")} = "{value}"') == 2
+    assert ('discovery.http "network_netbox"' in rendered) == network_enabled
+    assert ('      protocol = "",' in rendered) == (len(location) == 2)
+
+    cleared = ctx.run(
+        ctx.on.config_changed(),
+        replace(first, config={**first.config, "netbox-site": "", "netbox-region": ""}),
+    )
+    assert isinstance(cleared.unit_status, testing.ActiveStatus)
+    assert "external_labels" not in config_path.read_text()
+    assert calls == ["restart", "reload"]
+
+
+@pytest.mark.parametrize("option", ["netbox-site", "netbox-region"])
+def test_invalid_location_preserves_applied_config_with_snmp_disabled(runtime, option):
+    ctx, calls, config_path, _ = runtime
+    first = ctx.run(ctx.on.config_changed(), testing.State(config={option: "valid-scope"}))
+    original = config_path.read_text()
+    rejected = ctx.run(
+        ctx.on.config_changed(), replace(first, config={option: "invalid/private-value"})
+    )
+    assert isinstance(rejected.unit_status, testing.BlockedStatus)
+    assert rejected.unit_status.message == f"{option} must be a NetBox slug"
+    assert config_path.read_text() == original
+    assert calls == ["restart"]
+
+
+def test_custom_override_ignores_location_defaults(runtime):
+    ctx, _, config_path, _ = runtime
+    override = 'logging {\n  level = "info"\n}'
+    result = ctx.run(
+        ctx.on.config_changed(),
+        testing.State(config={"config-override": override, "netbox-region": "invalid/unused"}),
+    )
+    assert isinstance(result.unit_status, testing.ActiveStatus)
+    assert config_path.read_text() == override
+
+
 def test_secret_rotation_applies_once_and_removes_old_generation(runtime):
     ctx, calls, config_path, _ = runtime
     first = ctx.run(ctx.on.config_changed(), initial_state())

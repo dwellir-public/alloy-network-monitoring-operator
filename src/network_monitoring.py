@@ -175,6 +175,13 @@ def _slug(config: Mapping[str, object], key: str) -> str:
     return value
 
 
+def parse_location_labels(config: Mapping[str, object]) -> dict[str, str]:
+    """Use configured NetBox slugs as optional collection-scope label defaults."""
+    return {
+        label: value for label in ("site", "region") if (value := _slug(config, f"netbox-{label}"))
+    }
+
+
 def _duration(config: Mapping[str, object], key: str, default: str) -> tuple[str, float]:
     """Accept a positive Prometheus duration and return its duration in seconds."""
     value = _string(config, key, default)

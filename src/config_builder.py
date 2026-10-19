@@ -125,6 +125,7 @@ class ConfigBuilder:
         log_level: str = "info",
         collector_id: str = "",
         syslog_parsers: tuple[str, ...] = (),
+        location_labels: dict[str, str] | None = None,
     ):
         self._loki_endpoints = loki_endpoints
         self._remote_write_endpoints = remote_write_endpoints
@@ -141,6 +142,7 @@ class ConfigBuilder:
         self._receiver_hostname = receiver_hostname
         self._receiver_ip = receiver_ip
         self._syslog_parsers = syslog_parsers
+        self._location_labels = location_labels or {}
         self._topology_labels = topology_labels
         self._log_source_groups = log_source_groups or []
         self._network_pipeline = network_pipeline
@@ -305,6 +307,7 @@ class ConfigBuilder:
         return "\n".join(
             [
                 f'prometheus.remote_write "{REMOTE_WRITE_COMPONENT_NAME}" {{',
+                *self._render_location_defaults(),
                 endpoint_blocks,
                 "",
                 "  wal {",
@@ -559,12 +562,15 @@ class ConfigBuilder:
         return [self._render_remote_syslog_processor(), ""]
 
     def _render_remote_syslog_processor(self) -> str:
+        metadata: list[str] = list(SYSLOG_STRUCTURED_METADATA)
+        if len(self._location_labels) == 2:
+            metadata.append("protocol")
         lines = ['loki.process "remote_syslog" {']
         lines.extend(
             [
                 "  stage.structured_metadata {",
                 "    values = {",
-                *(f'      {key} = "",' for key in SYSLOG_STRUCTURED_METADATA),
+                *(f'      {key} = "",' for key in metadata),
                 "    }",
                 "  }",
                 "",
@@ -650,10 +656,17 @@ class ConfigBuilder:
             [
                 "",
                 'loki.write "main" {',
+                *self._render_location_defaults(),
                 endpoints,
                 "}",
             ]
         )
+
+    def _render_location_defaults(self) -> list[str]:
+        """Add collection location without replacing existing source label values."""
+        if not self._location_labels:
+            return []
+        return ["  external_labels = " + self._render_inline_labels(self._location_labels)]
 
     def _metrics_forward_to(self) -> str:
         if not self._remote_write_endpoints:

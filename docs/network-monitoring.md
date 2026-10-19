@@ -1,4 +1,4 @@
-# NetBox and SNMPv3 monitoring
+# NetBox and SNMPv2c/v3 monitoring
 
 `alloy-network-monitoring` installs Grafana Alloy and continuously reads device
 inventory from NetBox's Prometheus service-discovery plugin. Alloy polls selected
@@ -8,6 +8,10 @@ remote-write destinations. It never writes to NetBox.
 ## Configure a collector
 
 Deploy one unit per application and choose a unique, stable `collector-id`.
+This is your name for the monitoring scope, emitted as the `collector` label on
+network/self/host metrics and metric alert rules. It is independent of the
+NetBox filters and Juju application name; changing it creates new metric series
+and changes rule selectors. See the [collector explanation](../README.md#3-enable-discovery).
 Multiple applications may cover different scopes. Overlapping scopes collect
 the same devices independently; HA coordination is a later milestone.
 
@@ -20,7 +24,11 @@ secret with a `token` field. The `snmp-auth` config option references a secret
 with a `snmp-yaml` field containing the complete `auths` YAML mapping. These are
 secret references in config, rather than credentials.
 
-Copy the [SNMPv3 secret template](../examples/example.snmp_auth.yaml) outside the checkout,
+NetBox must have the
+[Prometheus service-discovery plugin](https://github.com/FlxPeters/netbox-plugin-prometheus-sd)
+installed and enabled. Its devices endpoint provides the inventory metadata.
+
+Copy the [SNMP secret template](../examples/example.snmp_auth.yaml) outside the checkout,
 replace its placeholders with the credentials configured on your devices, and
 save the NetBox token in a separate local file. Juju's
 [file input syntax](https://documentation.ubuntu.com/juju/3.6/reference/juju-cli/list-of-juju-cli-commands/add-secret/)
@@ -35,7 +43,7 @@ juju grant-secret secret:NETBOX-ID alloy-network-monitoring
 juju grant-secret secret:SNMP-ID alloy-network-monitoring
 juju config alloy-network-monitoring \
   network-monitoring-enabled=true \
-  collector-id=lab \
+  collector-id='<collector-name>' \
   netbox-url=https://netbox.example \
   netbox-token=secret:NETBOX-ID \
   snmp-auth=secret:SNMP-ID
@@ -46,20 +54,35 @@ and independent. Set any desired filters:
 
 ```bash
 juju config alloy-network-monitoring \
-  netbox-site=home netbox-region=sweden netbox-tags=snmp,edge
+  netbox-site='<site-name>' \
+  netbox-region='<region-name>' \
+  netbox-tags='<tag-name>,<another-tag-name>'
 ```
 
-Empty filters impose no restriction. Multiple tags use AND: both `snmp` and
-`edge` must be present. The status filter defaults to `active`; set
+Empty filters impose no restriction. Multiple tags use AND: every supplied tag
+must be present. Replace filter placeholders with NetBox slugs, and the collector
+placeholder with your own stable identifier. The status filter defaults to `active`; set
 `netbox-status=""` to include all statuses. Region selection uses NetBox's device
 filter. Verify descendant-region behavior against your installed NetBox version.
-The plugin does not supply per-device region metadata, so region is not emitted
-as a metric label.
+The plugin does not supply per-device region metadata. A configured
+`netbox-region` supplies the collection-scope `region` label instead; this may
+cover descendant regions selected by NetBox.
+
+Nonempty `netbox-site` and `netbox-region` values are also default labels on all
+metrics and logs sent by the generated configuration, including received syslog
+and manual scrape jobs. Existing source labels win, including the discovered
+SNMP site. Empty values add no labels. These defaults work without enabling
+NetBox/SNMP collection or configuring credentials, which supports syslog-only
+applications. They describe the configured collection scope; they do not look
+up the sender in NetBox or invent a `device` label. Setting, changing or clearing
+them creates new series/streams and leaves historical data unchanged.
 
 The discovery URL appends `/api/plugins/prometheus-sd/devices/` to `netbox-url`,
 preserving deployment path prefixes and encoding only configured filters.
 `netbox-auth-scheme=Bearer` is the default for NetBox v2 tokens; use `Token` for
-v1 tokens. A private CA can be supplied through `netbox-ca`, referencing a
+v1 tokens. Publicly trusted HTTPS certificates need no `netbox-ca`. A CA can be
+supplied through `netbox-ca` when the collector does not already trust the issuing
+chain, referencing a
 granted secret with a `ca-pem` certificate bundle. Certificate verification
 remains enabled.
 
@@ -75,17 +98,31 @@ juju config alloy-network-monitoring netbox-ca=secret:CA-ID
 
 ## Multiple authentications
 
-One secret supports up to 128 named SNMPv3 profiles. Each NetBox device's
+One secret supports up to 128 named SNMPv2c/v3 profiles. Each NetBox device's
 `snmp_auth` custom field selects a name such as `opnsense` or `cisco`. Names are
 configurable; separate profiles can serve vendors, device groups or individual
-devices. Profiles support `noAuthNoPriv`, `authNoPriv` and `authPriv`; passwords
-for authenticated modes must contain at least eight characters. SNMPv1/v2
-communities, duplicate YAML keys, custom modules and unknown fields are rejected.
+devices. SNMPv3 profiles explicitly use `version: 3` and support `noAuthNoPriv`,
+`authNoPriv` and `authPriv`; passwords for authenticated modes must contain at
+least eight characters. SNMPv2c profiles explicitly use `version: 2` and a
+nonempty quoted `community`, with no v3 authentication fields. Both kinds can
+share the same `auths` mapping and retain the same secret reference.
+SNMPv1 profiles, duplicate YAML keys, module definitions, empty communities and
+unknown or mixed protocol fields are rejected. See the
+[authentication reference](../README.md#2-create-and-grant-the-secrets).
+
+To add v2c support, retain the existing profiles in your YAML, add a named v2c
+entry, update the existing secret, and set the matching NetBox `snmp_auth` field.
+The community stays out of NetBox, Juju config and generated Alloy configuration;
+the v2c device connection itself is not encrypted.
 
 The secret contains credentials; NetBox contains only the profile name. Devices
 with an unknown profile are excluded. There is no fallback to embedded public
-credentials. Every device uses the embedded `system,if_mib` modules, merged with
-the supplied authentication profiles.
+credentials. Devices use `snmp-modules` (default `system,if_mib`) unless their
+optional NetBox text custom field `snmp_modules` supplies a replacement list.
+Use canonical comma-separated embedded names, such as
+`system,if_mib,cisco_device`. Credentials remain in the `snmp_auth` profile;
+module definitions remain embedded in Alloy. See the
+[complete module reference](../README.md#choose-snmp-modules-for-each-device).
 
 To rotate either secret, update its existing Juju secret ID, keeping the config
 reference:
@@ -115,7 +152,7 @@ Raw metadata and incoming internal routing labels are discarded before the
 embedded exporter constructs its own scrape targets.
 
 Samples use `job="snmp/network"`, `instance` set to the target's primary IPv4
-(for example, `10.99.100.254`), `netbox_id`, `device`, actual `site`, and
+(for example, `192.0.2.1`), `netbox_id`, `device`, actual `site`, and
 `collector`. SNMP samples also carry `juju_model`, `juju_model_uuid`,
 `juju_application`, `juju_unit` and `juju_charm` for the collector. These identify
 where collection happened; NetBox labels identify the device. Original `ifName`, `ifDescr`, `ifAlias` and
@@ -136,6 +173,8 @@ protocol and collector topology as indexed labels. Component, receiver
 hostname/address, connection hostname and process ID move to structured metadata
 to fit Loki's default 15-label limit. They remain available with LogQL pipeline
 filters, for example `{log_source="remote_syslog"} | syslog_proc_id="123"`.
+When both location defaults are set, transport `protocol` also moves to
+structured metadata; use `| protocol="udp"` or `| protocol="tcp"` to filter it.
 The explicit `service_name="loki.source.syslog"` retains the previous inferred
 service name. This requires a Loki backend that accepts structured metadata;
 the current lab supports it. See [Loki limits](https://grafana.com/docs/loki/latest/configure/)
@@ -170,6 +209,10 @@ reconciliation. `upgrade-charm` itself preserves the running service.
 | No remote-write destination | Network components and secret files are withdrawn; unit waits; other pipelines remain available |
 | Unreachable device or rejected device credentials | Scrape fails; inventory stays unchanged |
 | Unknown profile or missing/invalid primary IPv4 | Device is excluded |
+| Unknown/malformed per-device module list | Failed target is retained with `snmp_config_error="invalid_modules"`; no fallback to default polling |
+| Invalid global `snmp-modules` | Candidate is blocked before apply/reload; previous configuration remains |
+| Invalid discovered NetBox `snmp_modules` | Next Juju update-status reports blocked device IDs; valid targets continue; correcting the field allows status recovery |
+| Local target API unavailable during module checking | Juju waits for verification; running collection continues |
 | Discovery refresh fails | Running Alloy retains previous targets; discovery failure counter increases |
 | Successful empty discovery response | Previously discovered devices are withdrawn without restarting Alloy |
 | Cold start during discovery outage | No persisted inventory snapshot; no known targets until a successful refresh |
@@ -193,11 +236,50 @@ and any explicit storage arguments. The existing maximum WAL keepalive remains
 30 minutes; extended outages can lose unsent data. Size the persistent filesystem
 and verify delivery through your existing authenticated Mimir ingress.
 
-The charm adds collector-scoped rules for failed scrapes, no eligible targets,
+With `network-alerts-enabled=true` (the default), the charm adds collector-scoped rules for failed scrapes, no eligible targets,
 discovery failures, missing collector self metrics, remote-write backlog and low
 disk space using the existing `alert_rules` transport. The downstream ruler must
 already accept and evaluate that transport. Collector-loss alerts need backend
 evaluation because an unreachable collector cannot send its own health signal.
+
+## Optional device parsing and alerts
+
+`syslog-parsers` selects `opnsense_filterlog`, `cisco_ios`, both, or neither.
+Parsing applies to the existing remote receiver and preserves the original
+message. Extracted `event_*` fields become structured metadata rather than
+indexed labels. OPNsense IPv4/IPv6 firewall events include action, interface,
+addresses, protocol and TCP/UDP ports; Cisco messages include facility, severity,
+mnemonic and event classification. Unmatched messages continue normally.
+
+Enable new device/interface metric rules with
+`network-device-alerts-enabled=true`, and parsed event rules with
+`network-log-alerts-enabled=true`. Both default to false. The metric family also
+requires `network-alerts-enabled=true`. Log rules require an active receiver and
+a matching parser, independently of managed NetBox discovery. These switches
+only change owned rule shipping. They do not stop collection or related-provider
+rule forwarding. Gateway rule-forwarding relations must reach each backend.
+
+`network-alerts-config` supplies optional named interface scopes and preset
+thresholds. Interface rules require explicit device/`ifName` selectors. Device
+health rules evaluate only metrics actually returned by the selected modules.
+High-volume firewall-block and routine configuration-change event rules default
+to disabled. See the [schema and defaults](../README.md#enable-and-tune-alerts)
+and [complete public example](../examples/example.network-alerts.yaml).
+
+Investigate alerts using the affected device/interface labels:
+
+| Alert family | First checks |
+| --- | --- |
+| Failed scrape / invalid modules | Check `up`, its `snmp_config_error` label, the NetBox module list, selected profile, device reachability and permitted OIDs. |
+| Expected interface down | Check operational/admin state, physical cabling, peer state and whether the configured scope still names an expected port. Administratively down ports are excluded. |
+| Utilisation / errors / discards | Compare receive and transmit separately; verify reported speed and counters. Error/discard ratios use a packet-rate floor to suppress idle-port noise. |
+| CPU / memory | Inspect Cisco CPU and each memory pool; enhanced pools take precedence over legacy device pools. Missing metrics require polling/view investigation rather than a fabricated health alarm. |
+| Power / sensor fault | Compare the hardware's reported state with physical/environmental status. Unavailable sensors and administratively off power entries do not trigger these presets. |
+| Uptime reset | Compare SNMP agent uptime with device uptime and change history; the agent can restart without a device reboot. Near-wrap windows are suppressed. |
+| Parsed event count | Query original logs with `event_vendor`/`event_type` filters, check sender hostname/interface and account for receiver drops/rate limits. Compare the configured count, window and pending period. |
+
+No shared runbook URL is published by these rules. Temperature thresholds remain
+deferred until sensor units, scale and precision can be normalised.
 
 Self scraping follows the configured management listener and the debugging
 listener when debugging is enabled.
@@ -216,8 +298,9 @@ SNMP collection.
 - **Secret validation error:** NetBox requires `token`; SNMP profiles require
   `snmp-yaml`; the CA bundle requires `ca-pem`. Check field names and grants
   without copying credentials into logs or config.
-- **Targets with `up=0`:** confirm device reachability and SNMPv3 user, security
-  level, authentication/privacy protocols and passphrases. Authentication digest
+- **Targets with `up=0`:** confirm device reachability and the selected protocol.
+  For v2c, check the community and device read-only/source-address access rules.
+  For v3, check user, security level, authentication/privacy protocols and passphrases. Authentication digest
   errors indicate a mismatch; compare the device settings with its selected
   profile.
 - **`up=1` but missing counters:** check `scrape_samples_scraped` and the device's

@@ -50,11 +50,17 @@ config:
       type: string
       default: ""
     netbox-site:
-      description: Optional exact NetBox site slug; empty selects all sites.
+      description: |
+        Optional exact NetBox site slug; empty selects all sites. When set,
+        also supplies a site label default for generated metrics and logs,
+        including syslog-only collection. Existing source labels take precedence.
       type: string
       default: ""
     netbox-region:
-      description: Optional NetBox region slug; empty imposes no region filter.
+      description: |
+        Optional NetBox region slug; empty imposes no region filter. When set,
+        also supplies a region label default for generated metrics and logs,
+        including syslog-only collection. Existing source labels take precedence.
       type: string
       default: ""
     netbox-tags:

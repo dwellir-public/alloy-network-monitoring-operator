@@ -163,6 +163,7 @@ def test_live_relations_labels_secrets_and_refresh(backends, deployment, tmp_pat
         "juju_unit": unit,
         "juju_charm": "alloy-network-monitoring",
     }
+    location_labels = {"site": "fixture", "region": "fixture-region"}
     start_source(juju, unit)
     secrets = []
     source_app = "network-source-fixture-" + uuid.uuid4().hex[:8]
@@ -173,6 +174,7 @@ def test_live_relations_labels_secrets_and_refresh(backends, deployment, tmp_pat
         "unit": unit,
         "base": deployment.base,
         "expected_topology": expected,
+        "expected_location_labels": location_labels,
         "started_utc": datetime.now(timezone.utc).isoformat(),
         "prior_artifact_sha256": hashlib.sha256(deployment.artifact.read_bytes()).hexdigest(),
         "snmp_scope": (
@@ -204,6 +206,7 @@ def test_live_relations_labels_secrets_and_refresh(backends, deployment, tmp_pat
                 "snmp-scrape-interval": "5s",
                 "snmp-scrape-timeout": "2s",
                 "netbox-site": "fixture",
+                "netbox-region": "fixture-region",
                 "netbox-tags": "snmp",
                 "manual-metrics-jobs": json.dumps(
                     [
@@ -261,7 +264,7 @@ def test_live_relations_labels_secrets_and_refresh(backends, deployment, tmp_pat
                 backends["mimir_query"], "alloy_provider_fixture_metric{" + provider_selector + "}"
             )
         )
-        _assert_topology(provider_samples, provider_topology)
+        _assert_topology(provider_samples, {**provider_topology, **location_labels})
         evidence.update(
             source_fixture_artifact_sha256=hashlib.sha256(
                 source_artifact.read_bytes()
@@ -269,17 +272,17 @@ def test_live_relations_labels_secrets_and_refresh(backends, deployment, tmp_pat
             provider_topology=provider_topology,
             provider_metrics=provider_samples,
         )
-        selector = f'juju_application="{app}"'
+        selector = f'juju_application="{app}",site="fixture",region="fixture-region"'
         for metric in ("alloy_network_fixture_metric", "node_memory_MemTotal_bytes"):
             samples = wait_for(
                 lambda: query(backends["mimir_query"], metric + "{" + selector + "}")
             )
-            _assert_topology(samples, expected)
+            _assert_topology(samples, {**expected, **location_labels})
             evidence[metric] = samples
         samples = wait_for(
             lambda: query(backends["mimir_query"], f'up{{job="snmp/network",{selector}}}')
         )
-        _assert_topology(samples, expected)
+        _assert_topology(samples, {**expected, **location_labels})
         assert samples[0]["metric"]["instance"] == "127.0.0.2"
         assert samples[0]["metric"]["netbox_id"] == "1"
         evidence["snmp_up"] = samples
@@ -294,7 +297,7 @@ def test_live_relations_labels_secrets_and_refresh(backends, deployment, tmp_pat
                         logs=True,
                     )
                 )
-                _assert_topology(streams, expected, logs=True)
+                _assert_topology(streams, {**expected, **location_labels}, logs=True)
                 evidence[source] = streams
                 if source == "remote_syslog":
                     assert streams[0]["stream"]["syslog_hostname"] == "fixture-router"
@@ -315,7 +318,7 @@ def test_live_relations_labels_secrets_and_refresh(backends, deployment, tmp_pat
                     logs=True,
                 )
             )
-            _assert_topology(provider_logs, provider_topology, logs=True)
+            _assert_topology(provider_logs, {**provider_topology, **location_labels}, logs=True)
             evidence["provider_logs"] = provider_logs
         generation = snapshot(juju, unit)
         rotate_source(juju, unit)
@@ -412,7 +415,10 @@ def _check_network_feature_controls(deployment, backends, evidence):
         },
     )
     _wait_status(juju, app, "active")
-    selector = '{juju_application="' + app + '",log_source="remote_syslog"}'
+    selector = (
+        '{juju_application="' + app + '",log_source="remote_syslog",'
+        'site="fixture",region="fixture-region"}'
+    )
     events = [
         (
             "filterlog",

@@ -49,6 +49,12 @@ It skips explicitly when `PROMTOOL_BINARY` is absent; CI supplies both binaries.
 Alloy parser tests preserve
 original OPNsense IPv4/IPv6/ICMP and Cisco messages and check extracted fields.
 
+Location-label tests send actual metric and log requests between loopback Alloy
+components. They check empty, site-only, region-only and combined defaults after
+forwarding, preserve existing source labels and Juju identity, and verify the
+syslog indexed-label budget and transport protocol metadata. Unit tests cover
+configuration removal, invalid-slug recovery and syslog-only applications.
+
 ## Build artifacts
 
 ```bash
@@ -149,6 +155,14 @@ charm while watching the PID, WAL directory and device labels. Record actual
 results; a source-level refresh test alone does not prove live continuity.
 
 ## Current verification scope
+
+The configured-location-label change on 2026-10-19 passed 420 unit tests and
+14 native Alloy/Prometheus tests, including four checks of forwarded location
+labels. Lint, formatting, type and provenance checks passed. Both Ubuntu amd64
+artifacts rebuilt with matching runtime sources and unchanged relation contracts.
+The backend integration suite was extended to assert location labels, but its
+two tests skipped because no explicit nonproduction model was selected. This
+change has not been deployed or validated against a live Mimir/Loki stack.
 
 The README/module-status follow-up passed 404 unit tests and the native Alloy
 invalid-module/fallback/recovery check. Both Ubuntu artifacts rebuilt with
