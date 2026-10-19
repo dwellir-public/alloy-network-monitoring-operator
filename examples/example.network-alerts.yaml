@@ -1,0 +1,71 @@
+# Public alert preset example. Copy and adapt device/interface selectors.
+# Apply as network-alerts-config; enable device/log families separately.
+# All fields are optional except name/include inside each interface scope.
+interfaces:
+  - name: router-wan
+    devices: '<router-name>'
+    include: 'igb0'
+  - name: switch-uplinks
+    devices: 'core-.*'
+    include: 'TenGigabitEthernet1/(1|2)'
+    exclude: '.*\.100'
+interface_down:
+  enabled: true
+  for: 5m
+utilisation:
+  enabled: true
+  threshold: 85
+  for: 10m
+errors:
+  enabled: true
+  threshold: 1
+  min_packets: 10
+  for: 10m
+discards:
+  enabled: true
+  threshold: 1
+  min_packets: 10
+  for: 10m
+cpu:
+  enabled: true
+  threshold: 90
+  for: 10m
+memory:
+  enabled: true
+  threshold: 90
+  for: 10m
+power:
+  enabled: true
+  for: 2m
+sensors:
+  enabled: true
+  for: 5m
+uptime_reset:
+  enabled: true
+  for: 0s
+logs:
+  link_changes:
+    enabled: true
+    count: 4
+    window: 5m
+    for: 1m
+  authentication_failures:
+    enabled: true
+    count: 5
+    window: 5m
+    for: 1m
+  hardware_faults:
+    enabled: true
+    count: 1
+    window: 5m
+    for: 1m
+  configuration_changes:
+    enabled: false
+    count: 1
+    window: 5m
+    for: 0s
+  firewall_blocks:
+    enabled: false
+    count: 1000
+    window: 5m
+    for: 5m

@@ -1,675 +1,694 @@
 # alloy-network-monitoring
 
-A Juju machine charm for continuous NetBox discovery, SNMPv3 collection and
-metrics forwarding with Grafana Alloy. It retains the existing metrics, logs,
-syslog and observability integrations from `alloy-vm`.
+A Juju machine charm that discovers devices in NetBox, collects SNMPv2c/v3 metrics
+with Grafana Alloy, and forwards metrics to Mimir and logs to Loki. It also keeps
+the original `alloy-vm` features: host metrics, manual scrape jobs, related
+workload metrics and logs, journald, syslog reception and Grafana Cloud forwarding.
 
-Network monitoring is opt-in. `netbox-token` and `snmp-auth` accept granted Juju
-secret references. One SNMP secret holds multiple named authentication profiles;
-each device selects a profile through its NetBox `snmp_auth` custom field.
-`netbox-site`, `netbox-region` and `netbox-tags` are independently optional.
+Supported machines: **Ubuntu 22.04 or 24.04, amd64**. Fresh deployments install
+Alloy **1.20.1-1**. Run one collector unit per application; choose different
+inventory scopes for additional applications. Coordinated HA is not implemented.
 
-Start with the [network monitoring operator guide](docs/network-monitoring.md),
-the [SNMPv3 secret template](examples/example.snmp_auth.yaml), and the
-[build and verification instructions](docs/build-test-deploy.md).
-See [DEVELOPING.md](DEVELOPING.md) for dependency management and
-the [architecture guide](docs/charm-architecture.md) for configuration and
-service lifecycle behavior.
+- [Get started](#get-started)
+- [Choose SNMP modules for each device](#choose-snmp-modules-for-each-device)
+- [Receive and parse device logs](#receive-and-parse-device-logs)
+- [Enable and tune alerts](#enable-and-tune-alerts)
+- [Scrape an existing node-exporter](#scrape-an-existing-node-exporter)
+- [All Juju configuration options](#all-juju-configuration-options)
+- [Existing integrations](#existing-integrations)
+- [Troubleshooting and lifecycle](#troubleshooting-and-lifecycle)
 
+## Get started
 
-Supported bases:
+### 1. Connect the destinations
 
-- Ubuntu 22.04 amd64
-- Ubuntu 24.04 amd64
-
-## Metrics scraping to Mimir
-
-Alloy now supports:
-
-- local self metrics and `prometheus.exporter.unix` host metrics
-- relation-driven machine-local workload telemetry over `machine-observability`
-- relation-driven scrape targets over `metrics-endpoint` (`prometheus_scrape`)
-- manual scrape targets over `manual-metrics-jobs`
-- forwarding metrics upstream over `send-remote-write` (`prometheus_remote_write`)
-
-## Machine Observability
-
-`alloy-network-monitoring` can act as a principal machine collector for multiple other
-principal charms on the same host.
-
-It consumes:
-
-- endpoint name: `machine-observability`
-- interface name: `machine_observability`
-
-This path is intended for shared-machine aggregation where one `alloy-network-monitoring` unit
-collects telemetry from multiple colocated principals such as `op-node` and
-`op-reth`.
-
-### Contract requirements
-
-`alloy-network-monitoring` accepts v2 and v3 `machine_observability` payloads from related
-providers:
-
-- `schema_version: 2` or `schema_version: 3`
-- `source_topology`
-
-`source_topology` is required for telemetry because `alloy-network-monitoring` has no
-subordinate attachment from which to derive a fallback. In addition, non-empty
-v3 rule sets require valid `source_topology.model_uuid` and
-`source_topology.application` for stable ownership.
-
-If a related provider still publishes v1 payloads without `source_topology`,
-`alloy-network-monitoring` blocks with a message like:
-
-- `machine-observability from <app> requires schema_version 2 or 3 with source_topology`
-
-V3 retains the v2 telemetry shape and adds `prometheus_alert_rules` and
-`loki_alert_rules`. Artifacts use `gzip+base64`, include a decoded-byte SHA-256,
-and form complete desired state. The full payload may be exactly `60 * 1024`
-bytes but no larger, and is not chunked; at most 32 artifacts are admitted per
-relation.
-
-Alloy validates bounded rule documents and their PromQL/LogQL with packaged
-`cos-tool`, an internal hook-time CLI rather than a service or plugin. It
-injects labels from the original payload's source topology exactly once.
-Placeholder-bearing expressions and group names are rewritten for topology
-injection and deterministic scoping; non-topology labels are preserved. A malformed,
-future-version, or structurally invalid outer payload retains the whole
-relation's leader-shared LKG. Within a valid v3 payload, a malformed artifact
-retains only its own LKG. Valid omission and relation removal withdraw owned
-rules while unrelated telemetry continues.
-
-### What gets rendered
-
-For each related principal, `alloy-network-monitoring` translates the payload into:
-
-- per-source `prometheus.scrape` jobs using the provider's topology labels
-- per-source `loki.process` blocks with the provider's topology labels
-- journald sources for declared `systemd_units`
-- journald sources for declared `journal_match_expressions`
-- file log sources for declared `log_files`
-
-This means one `alloy-network-monitoring` unit can forward:
-
-- `op-node` metrics and logs labeled as `op-node`
-- `op-reth` metrics and logs labeled as `op-reth`
-- its own local Alloy and host metrics labeled as `alloy-network-monitoring`
-
-### Example relations
+Build the charm using the [build instructions](docs/build-test-deploy.md), then
+deploy the artifact for your Ubuntu base. Substitute your existing backend
+application names in the relations:
 
 ```bash
-juju relate alloy-network-monitoring:machine-observability op-node:machine-observability
-juju relate alloy-network-monitoring:machine-observability op-reth:machine-observability
+juju deploy ./alloy-network-monitoring_ubuntu@24.04-amd64.charm --base ubuntu@24.04
 juju relate alloy-network-monitoring:send-remote-write mimir-vm:receive-remote-write
 juju relate alloy-network-monitoring:send-loki-logs loki-vm:loki_push_api
 ```
 
-With gateways, add their separate rule-forwarding relations:
+Metrics need a remote-write destination, supplied by `send-remote-write` or
+`grafana-cloud-config`. Without one, the charm waits before enabling network,
+manual or related metrics scraping. Logs need a Loki destination.
 
-```bash
-juju relate alloy-network-monitoring:send-loki-logs loki-loadbalancer-vm:loki_push_api
-juju relate loki-loadbalancer-vm:loki-alert-rules loki-vm:loki_push_api
-juju relate loki-loadbalancer-vm:ingress loki-vm:ingress
-juju relate alloy-network-monitoring:send-remote-write mimir-gateway-vm:receive-remote-write
-juju relate mimir-gateway-vm:mimir-alert-rules mimir-vm:receive-remote-write
-juju relate mimir-gateway-vm:backend mimir-vm:backend
+### 2. Create and grant the secrets
+
+Copy the [SNMP authentication template](examples/example.snmp_auth.yaml) outside
+this checkout and replace its placeholders with the device credentials. Save
+your NetBox token in a separate file. The token file contains **only the raw
+token**, without `Bearer` or `Token`.
+
+For example, a file named `netbox-token.txt` contains one line (dummy value):
+
+```text
+0123456789abcdef0123456789abcdef01234567
 ```
 
-Dashboards do not pass through Alloy; each principal relates its standard
-`grafana_dashboard` endpoint directly to Grafana VM or Grafana K8s, including
-over CMR.
-
-Verify the related payloads on the Alloy unit:
+Replace that dummy value with the complete token copied from NetBox. The file has no
+`token:` key, quotes or authorization prefix. Juju's `token#file` syntax supplies
+the secret field name; the charm adds the configured header prefix.
 
 ```bash
-juju show-unit alloy-network-monitoring/0
+juju add-secret netbox-token 'token#file=./netbox-token.txt'
+juju add-secret snmp-auth 'snmp-yaml#file=./snmp_auth.yaml'
+
+# Use the secret references returned by the commands above.
+juju grant-secret secret:NETBOX-ID alloy-network-monitoring
+juju grant-secret secret:SNMP-ID alloy-network-monitoring
 ```
 
-Verify the rendered config:
+`netbox-token` and `snmp-auth` are Juju secret references, never passwords in Juju
+config. The SNMP secret must use the **`snmp-yaml`** field, not `token`. One secret
+supports up to 128 named profiles; a device's NetBox `snmp_auth` custom field
+selects its profile, for example `opnsense` or `cisco`.
 
-```bash
-juju ssh alloy-network-monitoring/0 'grep -n "op_node_0" -A20 /etc/alloy/config.alloy'
-juju ssh alloy-network-monitoring/0 'grep -n "op_reth_0" -A20 /etc/alloy/config.alloy'
-```
+The SNMP YAML contains only an `auths` mapping. **SNMPv2c and SNMPv3 profiles can
+share the same secret.** Each profile chooses its protocol using an explicit
+integer `version`.
 
-## Grafana Cloud Integrator
-
-`alloy-network-monitoring` can also consume Grafana Cloud endpoints and credentials from
-`grafana-cloud-integrator` over:
-
-- endpoint name: `grafana-cloud-config`
-- interface name: `grafana_cloud_config`
-
-This relation is separate from:
-
-- `send-remote-write` for plain Prometheus remote write URLs
-- `send-loki-logs` for plain Loki push URLs
-
-When `grafana-cloud-config` is related, `alloy-network-monitoring` can render authenticated:
-
-- `prometheus.remote_write` endpoints for Grafana Cloud metrics
-- `loki.write` endpoints for Grafana Cloud logs
-
-If `send-remote-write` or `send-loki-logs` is also related, Alloy forwards to
-both sets of endpoints. This means Grafana Cloud integration is additive rather
-than replacing existing upstreams.
-
-### Credential behavior
-
-`alloy-network-monitoring` consumes the relation data published by `grafana-cloud-integrator`.
-That contract supports:
-
-- shared legacy `username` and `password`
-- signal-specific credentials such as:
-  - `prometheus_username` / `prometheus_password`
-  - `loki_username` / `loki_password`
-
-Signal-specific credentials are used when present. This is required for Grafana
-Cloud setups where Prometheus and Loki use different instance IDs or tokens.
-
-### Connectivity checks
-
-During `update-status`, `alloy-network-monitoring` probes Grafana Cloud endpoints from the
-relation and surfaces failures as a blocked status, for example:
-
-- `Grafana Cloud metrics connectivity failed: ...`
-- `Grafana Cloud logs connectivity failed: ...`
-
-This only applies to the Grafana Cloud relation path. Plain `send-remote-write`
-and `send-loki-logs` relations keep their current behavior.
-
-### Example deployment
-
-Deploy and configure `grafana-cloud-integrator`:
-
-```bash
-juju deploy grafana-cloud-integrator
-juju config grafana-cloud-integrator prometheus-url="https://prometheus-prod-39-prod-eu-north-0.grafana.net/api/prom/push"
-juju config grafana-cloud-integrator loki-url="https://logs-prod-025.grafana.net/loki/api/v1/push"
-juju config grafana-cloud-integrator signal-credentials='
-prometheus:
-  username: "1076854"
-  password: "<prometheus-token>"
-loki:
-  username: "639149"
-  password: "<loki-token>"
-'
-```
-
-Relate it to Alloy:
-
-```bash
-juju relate alloy-network-monitoring:grafana-cloud-config grafana-cloud-integrator:grafana-cloud-config
-```
-
-Verify the rendered config on the Alloy unit:
-
-```bash
-juju ssh alloy-network-monitoring/0 'grep -n "prometheus.remote_write \\\"metrics\\\"" -A20 /etc/alloy/config.alloy'
-juju ssh alloy-network-monitoring/0 'grep -n "loki.write \\\"main\\\"" -A20 /etc/alloy/config.alloy'
-```
-
-Expected result:
-
-- the Grafana Cloud Prometheus endpoint is rendered with `basic_auth`
-- the Grafana Cloud Loki endpoint is rendered with `basic_auth`
-- if plain upstream relations also exist, the rendered Alloy config contains
-  both the plain and Grafana Cloud endpoints
-
-The intended release-1 operating model is one Alloy unit doing the scraping and forwarding work.
-For the shared observability deployment, Alloy forwards into one shared Mimir
-metrics store. Tenant-aware relation metadata is not required or published by
-`alloy-network-monitoring`; separation is done through metric labels such as Juju topology.
-
-For a validated local build and unit-test workflow for the
-`machine-observability` v2/v3 consumer path, see
-[docs/build-test-deploy.md](docs/build-test-deploy.md).
-
-### No-upstream behavior
-
-If Alloy has related or manual scrape targets but no `send-remote-write` relation:
-
-- relation-derived and manual scrape jobs are not enabled
-- no `prometheus.remote_write` component is rendered
-- local self metrics are dropped rather than buffered
-- the unit goes to:
-  - `waiting: Waiting for remote write before enabling manual or related metrics scraping`
-
-This is deliberate. The charm avoids accumulating local storage pressure when there is nowhere valid to send scraped metrics.
-
-### Remote write outage buffering
-
-When a valid remote write endpoint exists, Alloy renders a bounded WAL buffer on the
-`prometheus.remote_write` component:
-
-- `max_keepalive_time = "30m"`
-
-This means:
-
-- short upstream outages are buffered
-- longer outages can still lose older samples once the `30m` keepalive window is exceeded
-
-### Example relation to Mimir
-
-Relate Alloy to a deployed shared metrics endpoint such as `mimir-vm` directly:
-
-```bash
-juju relate alloy-network-monitoring:send-remote-write mimir-vm:receive-remote-write
-```
-
-If `mimir-gateway-vm` is deployed as the stable ingress/load balancer in front
-of Mimir, relate Alloy to the gateway instead:
-
-```bash
-juju relate alloy-network-monitoring:send-remote-write mimir-gateway-vm:receive-remote-write
-```
-
-In both cases, Alloy consumes a plain `prometheus_remote_write` URL contract.
-It does not require `tenant-id`, `X-Scope-OrgID`, or tenant-specific path
-handling.
-
-Verify the rendered remote write config on the Alloy unit:
-
-```bash
-juju ssh alloy-network-monitoring/<unit> 'grep -n "prometheus.remote_write \\\"metrics\\\"" -A8 /etc/alloy/config.alloy'
-```
-
-Verify a local unix-exporter metric in Mimir:
-
-```bash
-juju ssh mimir-vm/<unit> "curl -fsS 'http://127.0.0.1:9009/prometheus/api/v1/query?query=node_uname_info{juju_application=\"alloy-network-monitoring\"}'"
-```
-
-### Add a manual metrics scrape job
-
-You can configure Alloy to scrape extra metrics targets that are not provided
-over a Juju relation.
-
-Prerequisite: Alloy only enables manual metrics jobs when it has an upstream
-remote-write destination.
-
-Relate Alloy to Mimir first:
-
-```bash
-juju relate alloy-network-monitoring:send-remote-write mimir-vm:receive-remote-write
-```
-
-Create a YAML file describing the extra scrape job:
+For SNMPv2c, add a profile to your existing `auths` mapping, retaining the other
+profiles:
 
 ```yaml
-# manual-metrics-jobs.yaml
-- name: external-node-exporter
-  targets:
-    - "10.20.30.40:9100"
+auths:
+  legacy_v2c:
+    version: 2
+    community: "REPLACE-WITH-READ-ONLY-COMMUNITY"
+  # Keep your existing SNMPv3 profiles here too.
+```
+
+Set the device's NetBox `snmp_auth` field to `legacy_v2c`, then update the same
+secret:
+
+```bash
+juju update-secret secret:SNMP-ID 'snmp-yaml#file=./snmp_auth.yaml'
+```
+
+A v2c profile accepts only `version: 2` and a nonempty string `community`.
+Quote community values, especially if they look like numbers. No username,
+authentication/privacy protocol or password fields are used. The community is
+stored through Juju secrets and protected local files, using the same lifecycle
+as v3 credentials. SNMPv2c itself provides no encryption on the device connection.
+
+SNMPv3 profiles accept:
+
+| Field | Meaning |
+| --- | --- |
+| `version` | Required integer `3`. |
+| `username` | Required SNMPv3 username. |
+| `security_level` | Required: `noAuthNoPriv`, `authNoPriv` or `authPriv`. |
+| `auth_protocol` | Required for authenticated modes: `MD5`, `SHA`, `SHA224`, `SHA256`, `SHA384` or `SHA512`. |
+| `password` | Authentication passphrase, at least eight characters when required. |
+| `priv_protocol` | Required for `authPriv`: `DES`, `AES`, `AES192`, `AES256`, `AES192C` or `AES256C`. |
+| `priv_password` | Privacy passphrase, at least eight characters for `authPriv`. |
+| `context_name` | Optional SNMP context. |
+
+Algorithms and credentials must match the device. The secret is limited to
+1 MiB. Module definitions and SNMPv1 profiles are rejected. Missing/invalid
+versions, empty communities and mixed v2c/v3 fields are rejected rather than
+falling back to a default community.
+
+**Most installations can leave `netbox-ca` empty.** HTTPS certificates issued by
+a CA already trusted by the collector use Ubuntu's normal certificate trust.
+An extra secret is needed only when the collector does not trust the certificate
+chain, such as a private CA or self-signed deployment. A privately issued
+certificate may need this even when its leaf certificate is not self-signed.
+Certificate verification stays enabled.
+
+For those deployments, create and grant the optional CA secret:
+
+```bash
+juju add-secret netbox-ca 'ca-pem#file=./netbox-ca.pem'
+juju grant-secret secret:CA-ID alloy-network-monitoring
+juju config alloy-network-monitoring netbox-ca=secret:CA-ID
+```
+
+### 3. Enable discovery
+
+Your NetBox installation needs
+[netbox-plugin-prometheus-sd](https://github.com/FlxPeters/netbox-plugin-prometheus-sd),
+enabled as `netbox_prometheus_sd` in NetBox. Follow the plugin's installation and
+version-compatibility instructions. It exposes
+`/api/plugins/prometheus-sd/devices/`, which the charm reads automatically; set
+`netbox-url` to the NetBox base URL. Devices need a primary IPv4 address and a
+`snmp_auth` profile name found in the secret.
+
+Replace `<...>` placeholders in the following examples with your own values:
+
+```bash
+juju config alloy-network-monitoring \
+  network-monitoring-enabled=true \
+  collector-id='<collector-name>' \
+  netbox-url=https://netbox.example \
+  netbox-token=secret:NETBOX-ID \
+  snmp-auth=secret:SNMP-ID
+```
+
+`collector-id` is a name you choose for this collector's monitoring scope. It is
+required when network monitoring is enabled. It does not have to match the Juju
+application or a NetBox object. For example, two applications covering different
+sites could use `edge-collector-01` and `edge-collector-02`.
+
+The value appears as `collector="<collector-name>"` on SNMP metrics, the
+collector's self/host metrics and its metric alert rules. It lets dashboards and
+alerts select the right collection scope even when several collectors send to
+one Mimir instance. Juju labels still identify the model/application/unit, and
+NetBox labels identify the device.
+
+Choose a unique name across collectors sharing a backend and keep it stable.
+Changing it creates new metric series and changes alert selectors; existing
+history keeps the previous label. It does not select a site, filter devices,
+coordinate HA or prevent overlapping collectors from scraping the same device.
+Use letters, numbers, dots, dashes or underscores, with at most 64 characters.
+
+Site, region and tags are **independently optional**:
+
+```bash
+juju config alloy-network-monitoring \
+  netbox-site='<site-name>' \
+  netbox-region='<region-name>' \
+  netbox-tags='<tag-name>,<another-tag-name>'
+```
+
+An empty filter selects everything for that dimension. Multiple tags require
+**all** listed tags. Status defaults to `active`; use `netbox-status=""` to
+include every status. The region filter is handled by NetBox; descendant-region
+behavior depends on the installed NetBox version.
+For site, region and tag placeholders, use the corresponding NetBox **slugs**,
+which can differ from their display names.
+
+The default authentication scheme is `Bearer` for NetBox v2 tokens; use
+`netbox-auth-scheme=Token` for v1 tokens. The charm adds this prefix itself.
+
+## Choose SNMP modules for each device
+
+The default is `system,if_mib`, providing device uptime and interface metrics.
+Change the default for devices without an override:
+
+```bash
+juju config alloy-network-monitoring snmp-modules=system,if_mib
+```
+
+Add an optional NetBox **text** custom field named **`snmp_modules`** to devices.
+Use a comma-separated list with **no spaces**:
+
+| Device | `snmp_auth` | `snmp_modules` |
+| --- | --- | --- |
+| OPNsense router | `opnsense` | `system,if_mib` |
+| Cisco Catalyst switch | `cisco` | `system,if_mib,cisco_device` |
+| Device using the collector default | A valid profile | Empty or absent |
+
+The per-device list replaces the global list; include `system` and `if_mib` when
+you still want their metrics. Changes take effect on the next discovery refresh
+without restarting Alloy. Missing, empty, `None` or `null` values use the default.
+
+Each list permits one to eight embedded modules. With managed network monitoring
+enabled, the Juju **`snmp-modules`** option is checked before applying
+configuration or reloading Alloy. An unknown
+name or malformed list produces a Juju **blocked** status and retains the
+previous configuration.
+
+The NetBox **`snmp_modules`** custom field for eligible devices is checked during
+Alloy's discovery refresh, before device polling. These inventory changes do not reload Alloy.
+An invalid list retains a failed target with
+`snmp_config_error="invalid_modules"`; valid devices continue collecting.
+At the next Juju `update-status` check, the unit reports **blocked** with affected
+NetBox device IDs. Correct the field and the status recovers on the next check.
+If the local Alloy API cannot be inspected, Juju reports **waiting** while
+collection continues.
+
+Validation checks that the names exist in this charm's embedded module catalog.
+Whether a device returns the requested OIDs is checked by the actual SNMP scrape.
+
+**A Catalyst 4500-X is one example**, not a restriction on the supported devices.
+For that example, `system,if_mib,cisco_device` can be a starting module selection.
+Returned OIDs depend on the device's IOS XE release, SNMP views and standalone/VSS
+configuration.
+
+`cisco_device` is a module bundling selected OIDs/metrics from several MIBs,
+including Cisco CPU, memory pools, FRU power and ENTITY sensors. It is not one MIB
+or an instruction to poll every object in those MIBs. The
+[upstream generator definition](https://github.com/prometheus/snmp_exporter/blob/v0.30.0/generator/generator.yml)
+shows how these collection bundles are assembled.
+
+You can also select individual supported modules such as `if_mib` or `ip_mib`,
+for example `system,if_mib,ip_mib`. These names are lowercase; always use the
+catalog's **exact, case-sensitive** name. Some entries, such as `hrSystem`, use
+mixed case. Lowercasing a raw MIB name does not create a supported module. Custom
+MIB/module uploads are not currently included.
+
+The catalog is pinned to **Alloy 1.20.1** and comes from its
+[embedded SNMP configuration](https://github.com/grafana/alloy/blob/v1.20.1/internal/static/integrations/snmp_exporter/common/snmp.yml.gz).
+The file is gzip-compressed YAML; its `modules` keys are the available names.
+Compare the [current upstream catalog](https://github.com/grafana/alloy/blob/main/internal/static/integrations/snmp_exporter/common/snmp.yml.gz)
+or switch to a newer release tag to check future additions. Using new entries
+requires a compatible Alloy release and an updated charm allowlist. Available
+names for this charm are:
+
+```text
+apcups arista_sw cisco_device cisco_fc_fe cisco_imc cisco_wlc cyberpower
+ dell dell_network dlink eap eltex_mes fieldserver hpe hrDevice hrSWInstalled
+ hrSWRun hrSWRunPerf hrStorage hrSystem if_mib infrapower_pdu ip_mib juniper
+ juniper_optics keepalived kemp_loadmaster liebert_pdu mikrotik nec_ix
+ paloalto_fw powercom printer_mib raritan readynas servertech_sentry3
+ servertech_sentry4 sophos_xg synology system tplink-ddm ubiquiti_airfiber
+ ubiquiti_airmax ubiquiti_airos ubiquiti_unifi ucd_la_table ucd_memory
+ ucd_system_stats yamaha_rt
+```
+
+## Receive and parse device logs
+
+Enable the existing TCP and UDP listeners on port **1514**, then select parsers:
+
+```bash
+juju config alloy-network-monitoring \
+  enable-syslogreceivers=true \
+  syslog-parsers=opnsense_filterlog,cisco_ios
+```
+
+Point the devices' remote syslog settings at the Alloy machine. The receivers
+accept RFC5424 syslog; configure the sender accordingly. The `syslog-receiver`
+relation remains available for senders using the existing interface.
+
+Parser selection is configurable:
+
+| Profile | What it extracts |
+| --- | --- |
+| `opnsense_filterlog` | IPv4/IPv6 `filterlog` CSV events: rule, interface, reason, action, direction, protocol, addresses and TCP/UDP ports. |
+| `cisco_ios` | `%FACILITY-SEVERITY-MNEMONIC: message` events, classified as interface state/flap, login failure, configuration change, selected hardware alarm or generic message. |
+
+Cisco interface extraction covers LINK and LINEPROTO messages, including the
+`Line protocol on Interface` form shown in
+[Cisco's interface guide](https://www.cisco.com/c/en/us/td/docs/ios-xml/ios/interface/configuration/15-mt/ir-15-mt-book/ir-cfg-lan-if.html).
+
+OPNsense parsing requires the syslog application name `filterlog`. Cisco parsing
+matches the message format. Matching events gain **structured metadata** such as
+`event_vendor`, `event_type`, `event_interface`, `event_action`,
+`event_src_ip`, `event_dst_ip` and `event_mnemonic`. Ports are extracted only for
+TCP/UDP. Unmatched messages are forwarded normally.
+
+The original message is preserved. Parsed fields add no indexed labels, keeping
+the existing Loki label budget. Your Loki backend must accept structured
+metadata. For example:
+
+```logql
+{log_source="remote_syslog"} | event_vendor="opnsense" | event_action="block"
+{log_source="remote_syslog"} | event_vendor="cisco" | event_type="interface_state"
+```
+
+Set `syslog-parsers=""` to disable body parsing while continuing to receive logs.
+Set `enable-syslogreceivers=false` to disable reception. Existing drop expressions
+and rate limits apply after parsing and affect which events reach Loki and its
+alerts.
+
+## Enable and tune alerts
+
+### Start with the basic defaults
+
+With network monitoring enabled and `send-remote-write` related to a rule-capable
+backend, leave
+`network-alerts-config` empty to use the basic collector rules. They ship by
+default because `network-alerts-enabled=true`. Device/interface alerts, log
+alerts and syslog body parsing are opt-in.
+
+| Default collector alert | Condition | Must persist for |
+| --- | --- | --- |
+| `SNMPDeviceDown` | A discovered device's SNMP scrape has `up=0`. | `5m` |
+| `SNMPNoEligibleTargets` | No SNMP target series exists for this collector. | `5m` |
+| `NetBoxDiscoveryFailing` | Discovery failures increased during the last `5m`. | `2m` |
+| `NetworkCollectorDown` | Collector self-scrape is missing or has `up=0`. | `5m` |
+| `NetworkRemoteWriteBacklog` | More than 10,000 samples are pending remote write. | `10m` |
+| `NetworkCollectorDiskLow` | A monitored non-tmpfs filesystem has less than 10% free space. | `10m` |
+
+These collector thresholds are fixed. If you enable device rules, the basic
+defaults are Cisco CPU/memory above 90% for `10m`, selected interface utilisation above 85%
+for `10m`, and an expected administratively up port down for `5m`. Interface
+rules also require an explicit selection below; they do not alert on every port.
+
+### How the rules are shipped
+
+The **charm leader** generates the rule groups and publishes them in application
+relation data under `alert_rules`, along with collector metadata. It uses JSON
+or the existing negotiated compression. This is separate from Alloy sending
+metric samples and log entries.
+
+| Rules | Juju relation used | Evaluation happens in |
+| --- | --- | --- |
+| PromQL metric rules | `send-remote-write` → `receive-remote-write` | Mimir's ruler |
+| LogQL event rules | `send-loki-logs` → `loki_push_api` | Loki's ruler |
+
+For direct backend connections:
+
+```bash
+juju relate alloy-network-monitoring:send-remote-write mimir-vm:receive-remote-write
+juju relate alloy-network-monitoring:send-loki-logs loki-vm:loki_push_api
+```
+
+The receiving charm must consume and install the rules, with its ruler enabled
+and routed to Alertmanager for notifications. Relating the applications ships
+definitions; enabling an alert family does not configure notification receivers.
+For gateways, also connect their backend rule-forwarding relations shown under
+[existing integrations](#existing-integrations). A Grafana Cloud endpoint relation
+alone does not transport these rules.
+
+Inspect the **receiving unit's** relation data (for example,
+`juju show-unit mimir-vm/0` or `juju show-unit loki-vm/0`) for the collector's
+`alert_rules`/`metadata` fields. With a gateway, inspect its receiving unit too.
+Then check loaded groups and evaluation state in the Mimir/Loki ruler or Grafana
+alerting view. Metric/log arrival alone does not prove rule installation.
+
+### Enable additional alert families
+
+| Control | Default | Effect |
+| --- | --- | --- |
+| `network-alerts-enabled` | `true` | Ships the six existing collector metric alerts. Turning it off also disables new device/interface metric rules. |
+| `network-device-alerts-enabled` | `false` | Adds device health and selected interface rules when metric shipping is enabled. |
+| `network-log-alerts-enabled` | `false` | Ships event rules for enabled syslog parsers; independent of metric shipping. |
+
+Disabling these flags withdraws the charm's corresponding rule groups. Metrics
+and logs keep flowing. Related applications' alert rules continue to be
+forwarded using their own source identity.
+
+Enable the new rule families:
+
+```bash
+juju config alloy-network-monitoring \
+  network-device-alerts-enabled=true \
+  network-log-alerts-enabled=true
+```
+
+Device metric alerts require network monitoring. Event rules require syslog
+reception and a matching parser; they can work without NetBox discovery.
+
+The original collector rules are `SNMPDeviceDown`, `SNMPNoEligibleTargets`,
+`NetBoxDiscoveryFailing`, `NetworkCollectorDown`, `NetworkRemoteWriteBacklog` and
+`NetworkCollectorDiskLow`. New device rules cover invalid module selection,
+Cisco CPU/memory, power and sensor faults, and SNMP agent uptime resets.
+Unsupported or absent device metrics do not trigger those health rules.
+
+### Select expected interfaces
+
+Interface alerts require an **explicit scope**. Empty configuration enables no
+interface alerts, avoiding alarms on unused ports. Copy and edit the
+[alert configuration example](examples/example.network-alerts.yaml):
+
+```yaml
+interfaces:
+  - name: router-wan
+    devices: '<router-name>'
+    include: 'igb0'
+  - name: switch-uplinks
+    devices: 'core-.*'
+    include: 'TenGigabitEthernet1/(1|2)'
+    exclude: '.*\.100'
+utilisation:
+  threshold: 85
+  for: 10m
+errors:
+  threshold: 1
+  min_packets: 10
+  for: 10m
+logs:
+  firewall_blocks:
+    enabled: false
+```
+
+Apply this YAML as a Juju **string** option:
+
+```bash
+juju config alloy-network-monitoring network-alerts-config="$(cat ./network-alerts.yaml)"
+```
+
+Scope fields:
+
+| Field | Required/default | Meaning |
+| --- | --- | --- |
+| `name` | Required | Unique scope identifier: 1–32 letters, digits, `_` or `-`; added as `network_alert_profile` on alerts. |
+| `devices` | Default `.+` | Regex matching the NetBox device name (`device` label). |
+| `include` | Required | Regex matching the SNMP `ifName`. |
+| `exclude` | Default empty | Regex excluding `ifName` values. |
+
+Selectors match the complete label value. Use `.*` when you want a partial
+match. Up to eight scopes are accepted. Keep scopes disjoint to avoid duplicate
+alerts for one interface. Regexes are limited to 128 characters and do not
+accept lookarounds, backreferences or possessive repetition.
+
+### Metric preset reference
+
+`network-alerts-config` accepts these top-level preset mappings. Omitted fields
+use the defaults below; set `enabled: false` to omit an individual preset. All
+presets default to enabled **within the opt-in device family**.
+
+| Preset | Default fields | Behavior |
+| --- | --- | --- |
+| `interface_down` | `enabled: true`, `for: 5m` | Selected port is operationally down while administratively up. |
+| `utilisation` | `enabled: true`, `threshold: 85`, `for: 10m` | Receive and transmit utilisation are checked separately; uses HC octets and positive `ifHighSpeed` in Mb/s. |
+| `errors` | `enabled: true`, `threshold: 1`, `min_packets: 10`, `for: 10m` | Error percentage relative to HC unicast/multicast/broadcast packet rate, separately in/out. |
+| `discards` | `enabled: true`, `threshold: 1`, `min_packets: 10`, `for: 10m` | Discard percentage with the same packet-rate floor. |
+| `cpu` | `enabled: true`, `threshold: 90`, `for: 10m` | Cisco one-minute CPU percentage. |
+| `memory` | `enabled: true`, `threshold: 90`, `for: 10m` | Cisco pool usage percentage; enhanced pools preferred over legacy pools on each device. |
+| `power` | `enabled: true`, `for: 2m` | Selected fault states from Cisco FRU power state sets; administratively off/spare states are excluded. |
+| `sensors` | `enabled: true`, `for: 5m` | ENTITY sensor status is nonoperational; an unavailable sensor alone does not alarm. |
+| `uptime_reset` | `enabled: true`, `for: 0s` | Uptime decreases in a 15-minute window, suppressing values near a TimeTicks wrap. This can mean an agent restart, not necessarily a device reboot. |
+
+Percentages must be greater than zero and at most 100. `min_packets` is packets
+per second, not a packet count. Interface rates use five-minute windows. `for`
+is how long the condition must persist before firing; `0s` means no pending
+period. Durations use ordered units such as `5m` or `1h30m` and cannot exceed 24h.
+Temperature value alerts are not included: sensor units, scale and precision
+need normalisation first.
+
+`SNMPModuleSelectionInvalid` uses a fixed two-minute pending period and is
+included whenever device alerts are enabled.
+
+### Event preset reference
+
+Under the top-level `logs` mapping, every preset accepts `enabled`, `count`,
+`window` and `for`:
+
+| Preset | Required parser | Defaults | Behavior |
+| --- | --- | --- | --- |
+| `link_changes` | `cisco_ios` | Enabled; 4 events / `5m`; `for: 1m` | Interface state changes or flaps. |
+| `authentication_failures` | `cisco_ios` | Enabled; 5 events / `5m`; `for: 1m` | Login failure messages. |
+| `hardware_faults` | `cisco_ios` | Enabled; 1 event / `5m`; `for: 1m` | Selected ENVMON/FAN/POWER/PLATFORM_ENV messages with severity 0–3. |
+| `configuration_changes` | `cisco_ios` | Disabled; 1 event / `5m`; `for: 0s` | SYS CONFIG_I messages; opt in if every configuration change should alert. |
+| `firewall_blocks` | `opnsense_filterlog` | Disabled; 1,000 events / `5m`; `for: 5m` | Blocked packets; opt in and tune to your normal firewall traffic. |
+
+Counts are positive integers up to 1,000,000. Windows must be positive and at
+most 24h. Counts are grouped by sender hostname/instance and parsed interface
+where present. Firewall blocks on different interfaces have separate counts.
+Routine configuration messages and firewall blocks remain searchable even when
+their alert presets are disabled.
+
+The full YAML is limited to 16 KiB. Unknown fields, duplicate keys, invalid
+selectors and invalid thresholds block the candidate and retain the previously
+applied collection configuration and rules. Existing collector thresholds are
+fixed; the new preset YAML tunes device/interface and event rules.
+
+Published rules share the existing 60 KiB relation budget with related providers.
+Large interface selections can exceed it even within the eight-scope schema
+limit. The charm rejects an oversized candidate while keeping the applied rules;
+reduce scopes or disable unneeded presets if it reports a capacity error.
+
+## Scrape an existing node-exporter
+
+An exporter running on OPNsense can be scraped without a Juju relation. Its
+collectors, including netstat, run **on the router** and are configured there.
+The Alloy host exporter observes the Alloy machine.
+
+```yaml
+- name: opnsense-node
+  targets: ['192.0.2.1:9100']
   metrics_path: /metrics
   scheme: http
   scrape_interval: 30s
   scrape_timeout: 10s
   insecure_skip_verify: false
   labels:
-    env: prod
-    role: node
+    device: '<device-name>'
+    site: '<site-name>'
 ```
 
-Apply it to the charm:
+Save that list to a file and apply it:
 
 ```bash
-juju config alloy-network-monitoring manual-metrics-jobs="$(cat manual-metrics-jobs.yaml)"
+juju config alloy-network-monitoring manual-metrics-jobs="$(cat ./metrics-jobs.yaml)"
 ```
 
-What Alloy will do:
+Each job accepts only these fields:
 
-- render a dedicated `prometheus.scrape` component for `external-node-exporter`
-- inject local Juju topology labels such as `juju_model`, `juju_application`, and `juju_unit`
-- forward the scraped samples through the existing `prometheus.remote_write` path
+| Field | Required/default | Meaning |
+| --- | --- | --- |
+| `name` | Required, unique | Scrape job name. |
+| `targets` | Required, nonempty list | Prometheus exporter addresses, normally `host:port`. |
+| `metrics_path` | `/metrics` | HTTP path to scrape. |
+| `scheme` | `http` | `http` or `https`. |
+| `scrape_interval` | Alloy default `60s` | Optional duration such as `30s`; the manual schema accepts a number followed by one unit. |
+| `scrape_timeout` | Alloy default `10s` | Optional duration; must be valid for the chosen scrape interval. |
+| `insecure_skip_verify` | `false` | For HTTPS, explicitly skips certificate verification when true. |
+| `labels` | Empty mapping | Extra nonempty string labels. `juju_` labels are reserved and supplied by the charm. |
 
-Verify the rendered config on the Alloy unit:
+## All Juju configuration options
+
+Use `juju config alloy-network-monitoring` to inspect current values and
+`juju config alloy-network-monitoring OPTION=VALUE` to change one. Empty strings
+below mean the option is unset. YAML examples above are passed as string values.
+
+### Network discovery and SNMP
+
+| Option | Type | Default | Purpose |
+| --- | --- | --- | --- |
+| `network-monitoring-enabled` | Boolean | `false` | Enable managed NetBox/SNMP collection. |
+| `netbox-url` | String | Empty | HTTP(S) base URL, including any deployment path prefix. Required when enabled. |
+| `netbox-token` | String | Empty | Granted secret reference with a `token` field. Required when enabled. |
+| `snmp-auth` | String | Empty | Granted secret reference with a `snmp-yaml` field. Required when enabled. |
+| `netbox-auth-scheme` | String | `Bearer` | `Bearer` or `Token`. |
+| `netbox-ca` | String | Empty | Optional `ca-pem` secret for a certificate chain not already trusted by the collector. Publicly trusted certificates need none. |
+| `netbox-site` | String | Empty | Optional exact site slug. |
+| `netbox-region` | String | Empty | Optional region slug, passed to NetBox. |
+| `netbox-tags` | String | Empty | Optional comma-separated tag slugs; all must match. |
+| `netbox-status` | String | `active` | Device status slug; empty includes all statuses. |
+| `collector-id` | String | Empty | Required name for the collection scope, emitted as the `collector` metric/rule label; it does not filter devices. |
+| `netbox-refresh-interval` | String | `60s` | Positive inventory refresh duration. |
+| `snmp-scrape-interval` | String | `30s` | Positive device scrape duration. |
+| `snmp-scrape-timeout` | String | `15s` | Positive timeout, strictly shorter than the scrape interval. |
+| `snmp-modules` | String | `system,if_mib` | Default embedded module list; per-device `snmp_modules` replaces it. |
+
+### Alert shipping and presets
+
+| Option | Type | Default | Purpose |
+| --- | --- | --- | --- |
+| `network-alerts-enabled` | Boolean | `true` | Publish the collector's metric rules. |
+| `network-device-alerts-enabled` | Boolean | `false` | Include new device/interface rules when metric shipping is enabled. |
+| `network-log-alerts-enabled` | Boolean | `false` | Publish parsed network event rules through Loki relations. |
+| `network-alerts-config` | String | Empty | YAML presets and interface scopes; empty uses defaults with no interface scopes. |
+
+### Logs and syslog
+
+| Option | Type | Default | Purpose |
+| --- | --- | --- | --- |
+| `systemd-units` | String | Empty | Comma-separated host services whose journal logs should be forwarded. |
+| `journal-kernel` | Boolean | `false` | Include host kernel messages in the broader journal capture. |
+| `journal-match-expressions` | String | Empty | Newline-separated raw journal matches, for example `SYSLOG_IDENTIFIER=lxd`; passed through to journald. |
+| `enable-syslogreceivers` | Boolean | `false` | Receive RFC5424 syslog on TCP/UDP port 1514. |
+| `syslog-parsers` | String | Empty | Optional comma-separated `opnsense_filterlog,cisco_ios`; empty disables parsing. |
+| `syslog-drop-access-logs` | Boolean | `false` | Drop common HTTP request-style remote syslog lines. |
+| `syslog-drop-expressions` | String | Empty | Newline-separated regexes for dropping remote syslog lines. |
+| `syslog-rate-limit` | Integer | `0` | Forwarded remote lines/second after drops; `0` disables limiting. |
+| `syslog-rate-burst` | Integer | `0` | Burst size; `0` uses the rate limit when limiting is enabled. |
+
+### Local runtime and manual metrics
+
+| Option | Type | Default | Purpose |
+| --- | --- | --- | --- |
+| `manual-metrics-jobs` | String | Empty | YAML list of external Prometheus jobs; needs a metrics destination. |
+| `log-level` | String | `info` | Alloy logging: `debug`, `info`, `warn`, `error`; `warning` → `warn`, `critical` → `error`. |
+| `custom_args` | String | `--server.http.listen-addr=127.0.0.1:6987` | Alloy service arguments. An explicit listener address controls management access. Changes require a restart. |
+| `alloy-livedebugging` | Boolean | `false` | Enable live debugging; temporarily listens on `0.0.0.0:12345`; disabling restores previous arguments. |
+| `config-override` | String | Empty | Complete Alloy configuration. Replaces generated pipelines and bypasses managed network settings, parsing and owned network alerts. Empty restores generation. |
+
+## Existing integrations
+
+Endpoint names, interfaces and relation libraries are unchanged:
+
+| Endpoint | Interface | Purpose |
+| --- | --- | --- |
+| `send-remote-write` | `prometheus_remote_write` | Metrics destinations and Prometheus alert-rule delivery. |
+| `send-loki-logs` | `loki_push_api` | Log destinations and Loki alert-rule delivery. |
+| `metrics-endpoint` | `prometheus_scrape` | Scrape related Prometheus targets. |
+| `machine-observability` | `machine_observability` | Collect colocated principals' metrics, journal/file logs and v3 rule artifacts. |
+| `grafana-cloud-config` | `grafana_cloud_config` | Authenticated Grafana Cloud metrics/log destinations. |
+| `syslog-receiver` | `syslog` | Publish receiver connection details to related senders. |
+| `alloy-peers` | `alloy_peers` | Internal peer state. |
+
+Machine-observability accepts schema v2/v3 with `source_topology`. V1 payloads
+block because this principal charm cannot infer the source identity. V3 adds
+bounded Prometheus/Loki rule artifacts validated with packaged `cos-tool`.
+Malformed input retains its last valid rules; valid omission or relation removal
+withdraws that provider's rules. Collector alert flags do not affect providers.
+
+For colocated principals:
 
 ```bash
-juju ssh alloy-network-monitoring/0 'grep -n "prometheus.scrape \"external_node_exporter\"" -A20 /etc/alloy/config.alloy'
+juju relate alloy-network-monitoring:machine-observability op-node:machine-observability
+juju relate alloy-network-monitoring:machine-observability op-reth:machine-observability
 ```
 
-Verify the job label in Mimir:
+If you use gateways, retain their separate backend and rule-forwarding relations:
 
 ```bash
-juju ssh mimir-vm/0 "curl -fsS 'http://127.0.0.1:9009/prometheus/api/v1/query?query=up{job=\"external-node-exporter\"}'"
+juju relate alloy-network-monitoring:send-remote-write mimir-gateway-vm:receive-remote-write
+juju relate mimir-gateway-vm:mimir-alert-rules mimir-vm:receive-remote-write
+juju relate mimir-gateway-vm:backend mimir-vm:backend
+juju relate alloy-network-monitoring:send-loki-logs loki-loadbalancer-vm:loki_push_api
+juju relate loki-loadbalancer-vm:loki-alert-rules loki-vm:loki_push_api
+juju relate loki-loadbalancer-vm:ingress loki-vm:ingress
 ```
 
-To remove the manual job again:
+For Grafana Cloud, relate your configured integrator:
 
 ```bash
-juju config alloy-network-monitoring manual-metrics-jobs=""
+juju relate alloy-network-monitoring:grafana-cloud-config grafana-cloud-integrator:grafana-cloud-config
 ```
 
-Notes:
+Cloud destinations are additive to plain remote-write/Loki relations. Credentials
+come from the integrator, using signal-specific credentials when present and
+legacy shared credentials otherwise. `update-status` reports failed Cloud
+connectivity probes. Automatic rule shipping uses the two rule-capable relations
+above; the Cloud config relation supplies endpoints and credentials only.
 
-- `name` and `targets` are required.
-- `scheme` must be `http` or `https`.
-- Release 1 does not support auth, client certificates, relabeling, or service discovery in manual jobs.
-- If `send-remote-write` is not related, Alloy will not enable the manual job and the unit will wait for remote write.
+Dashboards relate directly from their providers to Grafana. They do not pass
+through Alloy. Metrics and logs collected for related providers retain their
+Juju identity; local, manual, SNMP and incoming syslog telemetry carries collector
+identity. SNMP `instance` is the management IPv4; `netbox_id` remains stable across
+renames and address changes.
 
-## Reconfigure Alloy with full override
+## Troubleshooting and lifecycle
 
-Dump the current override value:
+Start with these backend queries:
+
+```promql
+up{job="snmp/network"}
+{job="snmp/network", __name__=~"ifHC.*"}
+up{job="snmp/network", snmp_config_error="invalid_modules"}
+```
+
+- No targets: check filters, NetBox discovery errors, primary IPv4 and the
+  selected authentication profile. Unknown profiles are excluded.
+- `up=0`: check reachability, SNMP credentials/view and the module list. Invalid
+  lists have the error label above; successful discovery alone does not prove SNMP.
+- `up=1` with missing metrics: verify the device supplies the OIDs in the chosen
+  module. Health rules cannot evaluate metrics that the device does not return.
+- Logs without parsed fields: check `syslog-parsers`, the sender's application
+  name and message format. The original line remains available for comparison.
+- Missing alerts: check the family flags, interface scopes, parser requirements
+  and ruler configuration. Forwarding metrics/logs is separate from evaluating rules.
+
+Secret rotation keeps the same reference:
 
 ```bash
-juju config alloy-network-monitoring config-override
+juju update-secret secret:NETBOX-ID 'token#file=./netbox-token.txt'
+juju update-secret secret:SNMP-ID 'snmp-yaml#file=./snmp_auth.yaml'
 ```
 
-Set a full config override from a file:
-
-```bash
-juju config alloy-network-monitoring config-override="$(cat alloy.conf)"
-```
-
-Clear override and return to charm-generated config:
-
-```bash
-juju config alloy-network-monitoring config-override=""
-```
-
-## Enable live debugging
-
-Enable live debugging mode:
-
-```bash
-juju config alloy-network-monitoring alloy-livedebugging=true
-```
-
-What this does:
-- Sets `CUSTOM_ARGS` to `--server.http.listen-addr=0.0.0.0:12345` in `/etc/default/alloy`.
-- Adds a `livedebugging { enabled = true }` block to generated Alloy config.
-
-Verify on the unit:
-
-```bash
-juju ssh alloy-network-monitoring/<unit> 'grep "^CUSTOM_ARGS=" /etc/default/alloy'
-juju ssh alloy-network-monitoring/<unit> 'grep -n "livedebugging" /etc/alloy/config.alloy'
-```
-
-Disable live debugging and restore previous args:
-
-```bash
-juju config alloy-network-monitoring alloy-livedebugging=false
-```
-
-Optional: set your baseline custom args that should be restored after disabling:
-
-```bash
-juju config alloy-network-monitoring custom_args="--server.http.listen-addr=127.0.0.1:6987"
-```
-
-## Enable syslog receivers
-
-Enable TCP+UDP syslog listeners on port `1514`:
-
-```bash
-juju config alloy-network-monitoring enable-syslogreceivers=true
-```
-
-Behavior:
-- Starts `loki.source.syslog` listeners for both TCP and UDP on `:1514`.
-- Applies relabel rules for remote syslog metadata.
-- Routes remote syslog through a dedicated `loki.process "remote_syslog"` stage before
-  `loki.write.main`.
-- Adds collector Juju topology labels while retaining the sender's identity.
-- Stores auxiliary receiver/connection/process fields as structured metadata;
-  Loki must accept that metadata. See the
-  [label guide](docs/network-monitoring.md#eligibility-and-labels).
-- If there is no `send-loki-logs` relation, syslog is dropped (`forward_to = []`).
-
-### Optional remote syslog drop controls
-
-The remote syslog pipeline can be reduced before forwarding to Loki.
-
-Charm config:
-
-- `syslog-drop-access-logs`
-- `syslog-drop-expressions`
-- `syslog-rate-limit`
-- `syslog-rate-burst`
-
-Behavior:
-
-- `syslog-drop-access-logs=true` drops common request-style access-log lines such as
-  `GET ... HTTP/...` before they reach Loki.
-- `syslog-drop-expressions` accepts newline-separated regular expressions for additional
-  remote-syslog-only drops.
-- `syslog-rate-limit` and `syslog-rate-burst` apply a `stage.limit` guard to the
-  surviving remote syslog stream.
-
-This filtering only affects logs received through `loki.source.syslog "receiver"`.
-Local journal scraping is unaffected.
-
-Recommended operator use:
-
-- start by suppressing noisy logs at the source charm when possible
-- use Alloy as the second guardrail when a related charm still emits too much remote syslog
-- keep Loki retention finite as the final guardrail
-
-Recommended starting profiles:
-
-- keep all remote syslog:
-  - leave all `syslog-*` drop controls at their defaults
-- drop common HAProxy-style access logs but keep service/application logs:
-  - `syslog-drop-access-logs=true`
-- drop known noisy custom patterns as well:
-  - set `syslog-drop-expressions` to newline-separated regular expressions
-- rate-limit any surviving bursty remote syslog:
-  - set both `syslog-rate-limit` and `syslog-rate-burst`
-
-Example: drop common access logs
-
-```bash
-juju config alloy-network-monitoring syslog-drop-access-logs=true
-```
-
-Example: drop access logs and add a burst guard
-
-```bash
-juju config alloy-network-monitoring syslog-rate-limit=25
-juju config alloy-network-monitoring syslog-rate-burst=100
-```
-
-Example: add custom drop expressions
-
-```bash
-juju config alloy-network-monitoring syslog-drop-expressions=$'healthcheck\\n/readiness\\n/livez'
-```
-
-This means:
-
-- request-style access logs are removed before they reach Loki
-- only `25` surviving remote-syslog lines per second are kept
-- short bursts up to `100` lines are allowed before excess lines are dropped
-
-This is useful when a related charm can generate enough access traffic to
-inflate Loki ingestion and object-storage growth.
-
-This is intended as a second guardrail. Prefer suppressing noisy logs at the source
-charm first when possible.
-
-Reset to default behavior:
-
-```bash
-juju config alloy-network-monitoring syslog-drop-access-logs=false
-juju config alloy-network-monitoring syslog-drop-expressions=''
-juju config alloy-network-monitoring syslog-rate-limit=0
-juju config alloy-network-monitoring syslog-rate-burst=0
-```
-
-Verify on the unit:
-
-```bash
-juju ssh alloy-network-monitoring/<unit> 'grep -n "loki.process \"remote_syslog\"" -A20 /etc/alloy/config.alloy'
-```
-
-Verify in Loki/Grafana:
-
-- send a known manual syslog message and confirm it still appears
-- trigger the noisy traffic pattern, for example HAProxy access requests
-- confirm the access-log lines no longer appear while the manual message still does
-
-### `syslog-receiver` relation contract
-
-When another charm relates to `alloy-network-monitoring:syslog-receiver`, Alloy now publishes the
-receiver details over relation data.
-
-Published keys:
-- `address`
-- `port`
-- `protocols`
-- `recommended-protocol`
-- `ready`
-- `reason`
-
-Release-1 behavior:
-- `port` is `1514`
-- `protocols` is `tcp,udp`
-- `recommended-protocol` is `tcp`
-- `ready=true` only when syslog receivers are enabled and Alloy has an active
-  `send-loki-logs` path to Loki
-- if Alloy would drop the received logs because no Loki relation exists, it
-  publishes `ready=false` and `reason=waiting for send-loki-logs relation`
-
-This makes Alloy suitable as the immediate syslog receiver for charms such as
-`haproxy-dataplane-api`, while `loki-vm` remains the downstream log store.
-
-Verify on the unit:
-
-```bash
-juju ssh alloy-network-monitoring/<unit> 'grep -n "loki.source.syslog \\\"receiver\\\"" /etc/alloy/config.alloy'
-juju ssh alloy-network-monitoring/<unit> 'grep -n "protocol = \\\"udp\\\"\\|protocol = \\\"tcp\\\"" /etc/alloy/config.alloy'
-```
-
-Disable syslog listeners:
-
-```bash
-juju config alloy-network-monitoring enable-syslogreceivers=false
-```
-
-## Capture host kernel and raw journal matches
-
-The default host log path in `alloy-network-monitoring` only follows the named systemd units
-from `systemd-units`. You can extend this with:
-
-- `journal-kernel`
-- `journal-match-expressions`
-
-These options create an additional host journal source in Alloy.
-
-Behavior:
-
-- `systemd-units` logs still flow through the Juju-labeled log pipeline
-- kernel/raw host journal logs carry the collector's `juju_*` labels
-- if there is no `send-loki-logs` relation, the broader host journal path is
-  dropped just like the existing log pipeline
-
-### `journal-kernel`
-
-Enable host kernel transport logs:
-
-```bash
-juju config alloy-network-monitoring journal-kernel=true
-```
-
-What happens:
-
-- Alloy adds `_TRANSPORT=kernel` to a broader host journal source
-- this is intended to capture kernel log traffic similar to `dmesg`
-- these entries are forwarded to Loki with collector Juju topology labels
-
-### `journal-match-expressions`
-
-Add raw journald match expressions as newline-separated clauses:
-
-```bash
-juju config alloy-network-monitoring journal-match-expressions=$'SYSLOG_IDENTIFIER=lxd'
-```
-
-What happens:
-
-- the expressions are passed through without validation
-- empty lines are ignored
-- invalid expressions can break the rendered Alloy config and cause config
-  validation to fail
-
-Example: capture both kernel transport logs and host LXD messages
-
-```bash
-juju config alloy-network-monitoring journal-match-expressions=$'_TRANSPORT=kernel\nSYSLOG_IDENTIFIER=lxd'
-```
-
-Example: keep unit-based logs and add kernel capture
-
-```bash
-juju config alloy-network-monitoring systemd-units='ssh.service,snap.lxd.daemon.service'
-juju config alloy-network-monitoring journal-kernel=true
-```
-
-What happens:
-
-- `ssh.service` and `snap.lxd.daemon.service` logs still keep Juju topology labels
-- kernel transport logs are collected through the separate host journal path
-- the host journal path carries collector Juju topology labels
-
-Example: monitor an LXD host for kernel, LXD, and audit-style host messages
-
-```bash
-juju config alloy-network-monitoring systemd-units='snap.lxd.daemon.service'
-juju config alloy-network-monitoring journal-kernel=true
-juju config alloy-network-monitoring journal-match-expressions=$'SYSLOG_IDENTIFIER=audit\nSYSLOG_IDENTIFIER=lxd'
-```
-
-What happens:
-
-- `snap.lxd.daemon.service` logs are collected through the Juju-labeled service path
-- kernel transport logs are collected through the broader host journal path
-- host messages emitted with `SYSLOG_IDENTIFIER=lxd` or `SYSLOG_IDENTIFIER=audit`
-  are collected through the broader host journal path
-- the broader host journal path carries collector `juju_*` labels; related
-  workload logs retain their provider's topology
-
-### Verification
-
-Inspect the rendered host journal blocks:
-
-```bash
-juju ssh alloy-network-monitoring/<unit> 'grep -n "loki.source.journal" -A6 /etc/alloy/config.alloy'
-```
-
-Check that `_TRANSPORT=kernel` or your raw match expression is present:
-
-```bash
-juju ssh alloy-network-monitoring/<unit> 'grep -n "_TRANSPORT=kernel\\|SYSLOG_IDENTIFIER=lxd" /etc/alloy/config.alloy'
-```
-
-Query recent logs in Loki or Grafana after triggering a known matching message:
-
-```bash
-juju ssh loki-vm/<unit> 'start=$(date -u -d "15 minutes ago" +%s%N); end=$(date -u +%s%N); curl -sG --data-urlencode "query={}" --data-urlencode limit=20 --data-urlencode start=$start --data-urlencode end=$end http://127.0.0.1:3100/loki/api/v1/query_range'
-```
-
-If you added a raw identifier match, trigger the matching host service and look for
-the expected log line content in Grafana Explore or through Loki's API.
-
-```bash
-juju ssh alloy-network-monitoring/<unit> 'journalctl -n 20 --no-pager -u snap.lxd.daemon.service'
-```
-
-
-## Alert rule transport
-
-Alert rules use the receiver's `alert_rules_encodings` advertisement to negotiate
-Canonical-compatible LZMA/base64 encoding in the existing `alert_rules` field.
-Legacy receivers continue to receive JSON. The publisher uses Canonical's public
-`cosl.LZMABase64` codec when the receiver advertises LZMA support. Publishing keeps
-an 8 MiB decoded budget and a 60 KiB relation-value ceiling; oversized output is
-reported rather than truncated. Artifact validation and last-known-good handling
-remain local to this charm.
-
-Upgrade Loki/Mimir receivers and gateways before collectors when aggregates exceed
-the JSON size limit. Encoded values remain below 60 KiB, with the collector's
-existing stricter publication guard retained. Compression does not change source
-topology, machine-observability schema/artifact encoding, or artifact-count limits.
+Invalid candidates retain the last applied generation. A lost secret grant
+withdraws managed network collection and retires its files while other telemetry
+continues. Discovery outages retain Alloy's previous targets; a successful empty
+response withdraws them. Inventory changes and most configuration changes use
+reloads. Runtime argument changes require a restart.
+
+Charm refresh preserves the running process and storage; a normal subsequent
+configuration/secret event applies new settings. Existing units need an Alloy
+version supporting the generated components. The remote-write WAL keeps its
+component identity and a 30-minute retention bound. Longer destination outages
+can lose old samples.
+
+See the [operator guide](docs/network-monitoring.md) for failure handling and
+alert investigations, [architecture](docs/charm-architecture.md) for ownership
+and lifecycle, [DEVELOPING.md](DEVELOPING.md) for dependencies, and
+[verification instructions](docs/build-test-deploy.md) for build/live checks.

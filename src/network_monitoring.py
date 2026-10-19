@@ -6,9 +6,19 @@ import json
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from urllib.error import URLError
 from urllib.parse import urlencode, urlsplit, urlunsplit
+from urllib.request import ProxyHandler, build_opener
 
 import yaml
+
+from snmp_modules import (
+    DEFAULT_MODULES,
+    INVALID_MODULE,
+    SnmpModulesError,
+    module_list_regex,
+    parse_module_list,
+)
 
 _NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 _SLUG = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,99}$")
@@ -16,7 +26,8 @@ _DURATION = re.compile(r"(?:\d+(?:ms|[smhdwy]))+")
 _SECONDS = {"ms": 0.001, "s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800, "y": 31536000}
 _IPV4_OCTET = r"(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])"
 _IPV4 = rf"{_IPV4_OCTET}(\.{_IPV4_OCTET}){{3}}"
-_PROFILE_FIELDS = {
+_V2C_PROFILE_FIELDS = {"version", "community"}
+_V3_PROFILE_FIELDS = {
     "version",
     "username",
     "security_level",
@@ -30,10 +41,83 @@ _AUTH_PROTOCOLS = {"MD5", "SHA", "SHA224", "SHA256", "SHA384", "SHA512"}
 _PRIV_PROTOCOLS = {"DES", "AES", "AES192", "AES256", "AES192C", "AES256C"}
 MAX_AUTH_BYTES = 1024 * 1024
 MAX_AUTH_PROFILES = 128
+MAX_MODULE_STATUS_BYTES = 4 * 1024 * 1024
 
 
 class NetworkMonitoringError(ValueError):
     """Describe an invalid public setting or secret without exposing its values."""
+
+
+def read_snmp_module_errors(api_address: str) -> tuple[str, ...] | None:
+    """Read invalid module device IDs from public Alloy targets; None means unchecked."""
+    url = f"http://{api_address}/api/v0/web/components/discovery.relabel.network_scrape"
+    try:
+        with build_opener(ProxyHandler({})).open(url, timeout=2) as response:
+            body = response.read(MAX_MODULE_STATUS_BYTES + 1)
+        if len(body) > MAX_MODULE_STATUS_BYTES:
+            return None
+        data = json.loads(body)
+    except (URLError, OSError, ValueError, RecursionError):
+        return None
+    return _module_error_ids(data)
+
+
+def _module_error_ids(data: object) -> tuple[str, ...] | None:
+    """Validate the public export envelope and retain only sanitized device identifiers."""
+    if not isinstance(data, dict) or not isinstance(data.get("exports"), list):
+        return None
+    output = next(
+        (
+            item.get("value")
+            for item in data["exports"]
+            if isinstance(item, dict) and item.get("name") == "output"
+        ),
+        None,
+    )
+    if (
+        not isinstance(output, dict)
+        or output.get("type") != "array"
+        or not isinstance(output.get("value"), list)
+    ):
+        return None
+    ids = set()
+    for target in output["value"]:
+        labels = _module_status_labels(target)
+        if labels is None:
+            return None
+        if labels.get("snmp_config_error") == "invalid_modules":
+            device_id = labels.get("netbox_id", "")
+            ids.add(device_id if re.fullmatch(r"[1-9][0-9]{0,19}", device_id) else "unknown")
+    return tuple(sorted(ids))
+
+
+def _module_status_labels(target: object) -> dict[str, str] | None:
+    """Decode only the error marker and device ID, ignoring all other target fields."""
+    if (
+        not isinstance(target, dict)
+        or target.get("type") != "object"
+        or not isinstance(target.get("value"), list)
+    ):
+        return None
+    labels = {}
+    for label in target["value"]:
+        if not isinstance(label, dict) or not isinstance(label.get("key"), str):
+            return None
+        if label["key"] not in {
+            "snmp_config_error",
+            "netbox_id",
+        }:
+            continue
+        value = label.get("value")
+        if (
+            label["key"] in labels
+            or not isinstance(value, dict)
+            or value.get("type") != "string"
+            or not isinstance(value.get("value"), str)
+        ):
+            return None
+        labels[label["key"]] = value["value"]
+    return labels
 
 
 @dataclass(frozen=True)
@@ -53,6 +137,7 @@ class NetworkSettings:
     scrape_interval: str = "30s"
     scrape_timeout: str = "15s"
     ca_secret: str = ""
+    modules: tuple[str, ...] = DEFAULT_MODULES
 
 
 @dataclass(frozen=True)
@@ -159,6 +244,10 @@ def parse_network_settings(config: Mapping[str, object]) -> NetworkSettings | No
         if value
     ]
     filters.extend(("tag", tag) for tag in tags)
+    try:
+        modules = parse_module_list(_string(config, "snmp-modules", "system,if_mib"))
+    except SnmpModulesError as exc:
+        raise NetworkMonitoringError(str(exc)) from None
     return NetworkSettings(
         discovery_url=_discovery_url(_string(config, "netbox-url"), filters),
         token_secret=_string(config, "netbox-token"),
@@ -173,6 +262,7 @@ def parse_network_settings(config: Mapping[str, object]) -> NetworkSettings | No
         refresh_interval=refresh,
         scrape_interval=interval,
         scrape_timeout=timeout,
+        modules=modules,
     )
 
 
@@ -204,13 +294,28 @@ def _profile_string(profile: Mapping[str, object], key: str, *, required: bool =
 
 
 def _validate_profile(profile: object) -> None:
-    """Accept only the supported SNMPv3 authentication schema."""
-    if not isinstance(profile, dict) or set(profile) - _PROFILE_FIELDS:
+    """Validate an explicit SNMPv2c or SNMPv3 profile without credential fallbacks."""
+    if not isinstance(profile, dict):
+        raise NetworkMonitoringError("snmp-auth profiles must be mappings")
+    version = profile.get("version")
+    if type(version) is not int or version not in {2, 3}:
+        raise NetworkMonitoringError("snmp-auth profiles must explicitly set version: 2 or 3")
+    if version == 2:
+        if set(profile) - _V2C_PROFILE_FIELDS:
+            raise NetworkMonitoringError(
+                "snmp-auth SNMPv2c profiles support only version and community"
+            )
+        _profile_string(profile, "community", required=True)
+        return
+    _validate_v3_profile(profile)
+
+
+def _validate_v3_profile(profile: Mapping[str, object]) -> None:
+    """Keep the existing SNMPv3 username, security and protocol requirements."""
+    if set(profile) - _V3_PROFILE_FIELDS:
         raise NetworkMonitoringError(
-            "snmp-auth profiles must use only supported SNMPv3 authentication fields"
+            "snmp-auth SNMPv3 profiles must use only supported authentication fields"
         )
-    if type(profile.get("version")) is not int or profile["version"] != 3:
-        raise NetworkMonitoringError("snmp-auth profiles must explicitly set version: 3")
     _profile_string(profile, "username", required=True)
     level = _profile_string(profile, "security_level", required=True)
     if level not in {"noAuthNoPriv", "authNoPriv", "authPriv"}:
@@ -251,7 +356,9 @@ def parse_snmp_authentications(content: Mapping[str, str]) -> SnmpAuthentication
         )
     try:
         parsed = yaml.load(raw, Loader=_UniqueKeyLoader)
-    except (yaml.YAMLError, RecursionError):
+    except NetworkMonitoringError:
+        raise
+    except (yaml.YAMLError, RecursionError, ValueError):
         raise NetworkMonitoringError("snmp-auth snmp-yaml must be valid YAML") from None
     if not isinstance(parsed, dict) or set(parsed) != {"auths"}:
         raise NetworkMonitoringError("snmp-auth snmp-yaml must contain only an auths mapping")
@@ -289,7 +396,7 @@ def _rule(
     *,
     source: str = "",
     target: str = "",
-    replacement: str = "",
+    replacement: str | None = None,
     action: str = "replace",
     regex: str = "",
 ) -> str:
@@ -297,7 +404,9 @@ def _rule(
     fields = [f"    action = {json.dumps(action)}"]
     if source:
         fields.append(f"    source_labels = [{json.dumps(source)}]")
-    for key, value in (("target_label", target), ("replacement", replacement), ("regex", regex)):
+    if replacement is not None:
+        fields.append(f"    replacement = {json.dumps(replacement)}")
+    for key, value in (("target_label", target), ("regex", regex)):
         if value:
             fields.append(f"    {key} = {json.dumps(value)}")
     return "  rule {\n" + "\n".join(fields) + "\n  }"
@@ -348,11 +457,35 @@ def render_network_blocks(
     rules.extend(
         [
             _rule(source="netbox_id", target="name", replacement="netbox-device-${1}"),
-            _rule(target="module", replacement="system,if_mib"),
+            _rule(target="module", replacement=",".join(settings.modules)),
+            _rule(
+                source="__meta_netbox_custom_field_snmp_modules",
+                target="module",
+                regex="(.+)",
+            ),
+            _rule(
+                source="module",
+                regex="(?:None|null)",
+                target="module",
+                replacement=",".join(settings.modules),
+            ),
+            _rule(target="snmp_config_error", replacement="invalid_modules"),
+            _rule(
+                source="module",
+                regex=module_list_regex(),
+                target="snmp_config_error",
+                replacement="",
+            ),
+            _rule(
+                source="snmp_config_error",
+                regex="invalid_modules",
+                target="module",
+                replacement=INVALID_MODULE,
+            ),
             _rule(target="collector", replacement=settings.collector),
             _rule(
                 action="labelkeep",
-                regex="name|address|module|auth|netbox_id|device|site|collector",
+                regex="name|address|module|auth|netbox_id|device|site|collector|snmp_config_error",
             ),
         ]
     )
@@ -400,7 +533,7 @@ def render_network_blocks(
             *(_rule(target=key, replacement=topology[key]) for key in sorted(topology)),
             _rule(
                 action="labelkeep",
-                regex="__.*|job|instance|netbox_id|device|site|collector"
+                regex="__.*|job|instance|netbox_id|device|site|collector|snmp_config_error"
                 + ("|" + "|".join(sorted(topology)) if topology else ""),
             ),
             "}",

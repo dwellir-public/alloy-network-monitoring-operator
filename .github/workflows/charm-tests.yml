@@ -34,7 +34,11 @@ jobs:
           uv run tox -e lint
           uv run tox -e static
           uv run tox -e unit
-      - name: Verify native Alloy discovery, labels, secrets and WAL behavior
+      - name: Verify native Alloy pipelines and numerical alert behavior
         run: |
+          sudo apt-get update -qq
+          sudo apt-get install --no-install-recommends -y snmpd
           python3 tools/fetch_alloy.py --output "$RUNNER_TEMP/alloy/alloy-linux-amd64"
-          ALLOY_BINARY="$RUNNER_TEMP/alloy/alloy-linux-amd64" uv run tox -e binary
+          python3 tools/fetch_promtool.py --output "$RUNNER_TEMP/promtool/promtool"
+          ALLOY_BINARY="$RUNNER_TEMP/alloy/alloy-linux-amd64" \
+          PROMTOOL_BINARY="$RUNNER_TEMP/promtool/promtool" uv run tox -e binary

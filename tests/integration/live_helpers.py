@@ -133,7 +133,9 @@ def snapshot(juju: jubilant.Juju, unit: str) -> dict:
     return json.loads(remote_python(juju, unit, code))
 
 
-def emit_logs(juju: jubilant.Juju, unit: str, message: str) -> None:
+def emit_logs(
+    juju: jubilant.Juju, unit: str, message: str, *, application: str = "fixture-app"
+) -> None:
     """Emit synthetic syslog and journal messages only on the isolated test unit."""
     remote_python(
         juju,
@@ -141,8 +143,42 @@ def emit_logs(juju: jubilant.Juju, unit: str, message: str) -> None:
         "import socket,subprocess\nfrom datetime import datetime,timezone\n"
         "stamp=datetime.now(timezone.utc).isoformat().replace('+00:00','Z')\n"
         f"message={message!r}\n"
-        "payload=f'<14>1 {stamp} fixture-router fixture-app 123 fixture - {message}'\n"
+        f"application={application!r}\n"
+        "payload=f'<14>1 {stamp} fixture-router {application} 123 fixture - {message}'\n"
         "with socket.socket(socket.AF_INET,socket.SOCK_DGRAM) as s:\n"
         " s.sendto(payload.encode(),('127.0.0.1',1514))\n"
         "subprocess.run(['logger','-t','alloy-network-fixture',message],check=True)\n",
+    )
+
+
+def set_inventory_modules(juju: jubilant.Juju, unit: str, modules: str) -> None:
+    """Change public module metadata in this test's loopback inventory only."""
+    remote_python(
+        juju,
+        unit,
+        "import json\nfrom pathlib import Path\n"
+        "p=Path('/tmp/alloy-network-fixture/state.json')\n"
+        "s=json.loads(p.read_text())\n"
+        f"s['inventory'][0]['labels']['__meta_netbox_custom_field_snmp_modules']={modules!r}\n"
+        "q=p.with_suffix('.new');q.write_text(json.dumps(s));q.replace(p)\n",
+    )
+
+
+def network_target_modules(juju: jubilant.Juju, unit: str) -> list[str]:
+    """Read public selected modules from the fixture unit's Alloy component API."""
+    return json.loads(
+        remote_python(
+            juju,
+            unit,
+            "import json\nfrom urllib.request import urlopen\n"
+            "with urlopen('http://127.0.0.1:6987/api/v0/web/components/'"
+            "'discovery.relabel.network_scrape',timeout=5) as r: data=json.load(r)\n"
+            "def decode(item):\n"
+            " kind,value=item['type'],item['value']\n"
+            " if kind=='array': return [decode(x) for x in value]\n"
+            " if kind=='object': return {x['key']:decode(x['value']) for x in value}\n"
+            " return value\n"
+            "targets=decode(next(x['value'] for x in data['exports'] if x['name']=='output'))\n"
+            "print(json.dumps([x.get('__param_module','') for x in targets]))\n",
+        )
     )

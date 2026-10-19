@@ -55,14 +55,17 @@ from machine_observability_sources import (
     translate_machine_observability_payload,
 )
 from manual_metrics_jobs import ManualMetricsJobsError, parse_manual_metrics_jobs
-from network_alerts import network_alert_groups
+from network_alert_settings import NetworkAlertsError, NetworkAlertSettings, parse_alert_settings
+from network_alerts import device_alert_groups, network_alert_groups, network_log_alert_groups
 from network_monitoring import (
     NetworkMonitoringError,
     NetworkPipeline,
     parse_netbox_token,
     parse_network_settings,
     parse_snmp_authentications,
+    read_snmp_module_errors,
 )
+from network_syslog import SyslogParsersError
 from outbound_endpoints import OutboundEndpoint, dedupe_endpoints
 from secret_files import SecretFiles, remove_secret_files, stage_secret_files
 
@@ -167,8 +170,10 @@ class AlloyCharm(ops.CharmBase):
             livedebug_prev_custom_args_set=False,
             network_secret_files={},
             last_network_collector="",
+            network_feature_config={},
         )
         self._network_pipeline: NetworkPipeline | None = None
+        self._network_features = NetworkAlertSettings()
         self._network_status: ops.StatusBase | None = None
         self._staged_secrets: SecretFiles | None = None
         self._charm_refresh = False
@@ -363,6 +368,10 @@ class AlloyCharm(ops.CharmBase):
             self._refresh_syslog_receiver_relations()
             if self._stored.config_drifted:
                 return
+            module_status = self._network_module_status()
+            if module_status is not None:
+                self.unit.status = module_status
+                return
             connectivity_error = self._grafana_cloud_status_error()
             if connectivity_error is not None:
                 self.unit.status = ops.BlockedStatus(connectivity_error)
@@ -371,6 +380,25 @@ class AlloyCharm(ops.CharmBase):
                 self.unit.status = self._post_config_status("Alloy is running.")
         finally:
             self._reconcile_rule_groups(event)
+
+    def _network_module_status(self) -> ops.StatusBase | None:
+        """Report discovered module errors while valid targets continue collecting."""
+        if not self._network_pipeline:
+            return None
+        invalid_devices = read_snmp_module_errors(self._self_metrics_address())
+        if invalid_devices is None:
+            return ops.WaitingStatus(
+                "Unable to verify NetBox snmp_modules through the local Alloy API"
+            )
+        if not invalid_devices:
+            return None
+        device_ids = ", ".join(invalid_devices[:5])
+        remaining = len(invalid_devices) - 5
+        suffix = f" (+{remaining} more)" if remaining > 0 else ""
+        return ops.BlockedStatus(
+            f"Invalid NetBox snmp_modules for device IDs {device_ids}{suffix}; "
+            "use supported module names without spaces"
+        )
 
     def _on_syslog_receiver_relation_event(self, event):
         """Publish current syslog receiver details for related requirers."""
@@ -439,41 +467,157 @@ class AlloyCharm(ops.CharmBase):
                 relation_state = candidate
 
         prometheus_groups, loki_groups = self._flatten_rule_state(relation_state)
-        network_groups = self._network_alert_groups()
-        combined = prometheus_groups + network_groups
-        payload = json.dumps({"groups": combined}, sort_keys=True, separators=(",", ":"))
-        if len(payload.encode()) < RULE_PUBLICATION_VALUE_LIMIT:
-            prometheus_groups = combined
-        elif network_groups:
-            self.unit.status = ops.BlockedStatus("Network alert rules exceed relation capacity")
+        prometheus_groups = self._with_network_rule_groups(
+            prometheus_groups, self._network_alert_groups(), "metric"
+        )
+        loki_groups = self._with_network_rule_groups(
+            loki_groups, self._network_log_alert_groups(), "log"
+        )
         publish_rule_groups(self, "send-remote-write", prometheus_groups)
         publish_rule_groups(self, "send-loki-logs", loki_groups)
         self._set_rule_destination_status(prometheus_groups, loki_groups)
 
+    def _with_network_rule_groups(self, related, owned, kind):
+        """Keep related rules when owned additions exceed the existing transport limit."""
+        combined = related + owned
+        payload = json.dumps({"groups": combined}, sort_keys=True, separators=(",", ":"))
+        if len(payload.encode()) < RULE_PUBLICATION_VALUE_LIMIT:
+            return combined
+        if owned:
+            self.unit.status = ops.BlockedStatus(
+                f"Network {kind} alert rules exceed relation capacity"
+            )
+        return related
+
+    def _validate_network_rule_capacity(self) -> None:
+        """Reject oversized candidate presets before replacing applied settings or rules."""
+        if str(self.config.get("config-override", "")).strip():
+            return
+        topology = self._network_topology_labels()
+        owner = f"{self.model.uuid}_{self.app.name}"
+        collector = (
+            self._network_pipeline.settings.collector
+            if self._network_pipeline
+            else self._stored.last_network_collector
+        )
+        metrics = []
+        if (
+            self.config.get("network-monitoring-enabled")
+            and collector
+            and self._network_features.metrics_enabled
+        ):
+            metrics = network_alert_groups(collector, owner, topology_labels=topology)
+            metrics += device_alert_groups(
+                collector, owner, topology_labels=topology, settings=self._network_features
+            )
+        logs = (
+            network_log_alert_groups(
+                owner, topology_labels=topology, settings=self._network_features
+            )
+            if self.config.get("enable-syslogreceivers")
+            else []
+        )
+        related_state = (
+            {
+                relation.id: self._load_relation_rule_cache(relation)
+                for relation in self.model.relations.get("machine-observability", [])
+            }
+            if self.unit.is_leader()
+            else {}
+        )
+        related_metrics, related_logs = self._flatten_rule_state(
+            self._bounded_existing_rule_state(related_state)
+        )
+        for kind, related, owned in (
+            ("metric", related_metrics, metrics),
+            ("log", related_logs, logs),
+        ):
+            payload = json.dumps(
+                {"groups": related + owned}, sort_keys=True, separators=(",", ":")
+            )
+            if owned and len(payload.encode()) >= RULE_PUBLICATION_VALUE_LIMIT:
+                raise NetworkAlertsError(
+                    f"Network {kind} alert rules exceed relation capacity; "
+                    "reduce scopes or presets"
+                )
+
     def _network_alert_groups(self) -> list[dict[str, object]]:
         """Publish owned network rules while preserving existing relation contracts."""
-        if (
-            not self.config.get("network-monitoring-enabled")
-            or str(self.config.get("config-override", "")).strip()
+        applied = dict(self._stored.network_feature_config)
+        if not applied.get(
+            "network-monitoring-enabled", self.config.get("network-monitoring-enabled")
+        ) or applied.get(
+            "override-active", bool(str(self.config.get("config-override", "")).strip())
         ):
+            return []
+        features = parse_alert_settings(applied) if applied else NetworkAlertSettings()
+        if not features.metrics_enabled:
             return []
         collector = self._stored.last_network_collector
         if not collector:
             return []
         owner = f"{self.model.uuid}_{self.app.name}"
+        topology = self._network_topology_labels()
         return network_alert_groups(
             collector,
             owner,
-            topology_labels=self._topology.as_dict(
-                remapped_keys={
-                    "model": "juju_model",
-                    "model_uuid": "juju_model_uuid",
-                    "application": "juju_application",
-                    "unit": "juju_unit",
-                    "charm_name": "juju_charm",
-                }
-            ),
+            topology_labels=topology,
+        ) + device_alert_groups(collector, owner, topology_labels=topology, settings=features)
+
+    def _network_topology_labels(self) -> dict[str, str]:
+        """Return collector provenance for owned rules and generated telemetry."""
+        return self._topology.as_dict(
+            remapped_keys={
+                "model": "juju_model",
+                "model_uuid": "juju_model_uuid",
+                "application": "juju_application",
+                "unit": "juju_unit",
+                "charm_name": "juju_charm",
+            }
         )
+
+    def _network_log_alert_groups(self) -> list[dict[str, object]]:
+        """Publish only log rules for the successfully applied receiver/parser settings."""
+        applied = dict(self._stored.network_feature_config)
+        if (
+            not applied
+            or not applied.get("enable-syslogreceivers")
+            or applied.get("override-active")
+        ):
+            return []
+        return network_log_alert_groups(
+            f"{self.model.uuid}_{self.app.name}",
+            topology_labels=self._network_topology_labels(),
+            settings=parse_alert_settings(applied),
+        )
+
+    def _commit_network_features(self) -> None:
+        """Remember validated public controls only after their runtime generation applies."""
+        names = (
+            "network-alerts-enabled",
+            "network-device-alerts-enabled",
+            "network-log-alerts-enabled",
+            "network-alerts-config",
+            "syslog-parsers",
+            "network-monitoring-enabled",
+            "enable-syslogreceivers",
+        )
+        defaults = {
+            "network-alerts-enabled": True,
+            "network-device-alerts-enabled": False,
+            "network-log-alerts-enabled": False,
+            "network-alerts-config": "",
+            "syslog-parsers": "",
+            "network-monitoring-enabled": False,
+            "enable-syslogreceivers": False,
+        }
+        self._stored.network_feature_config = {
+            **{name: self.config.get(name, defaults[name]) for name in names},
+            "override-active": bool(str(self.config.get("config-override", "")).strip()),
+        }
+        if self._stored.network_feature_config["override-active"]:
+            self._stored.network_feature_config["network-alerts-config"] = ""
+            self._stored.network_feature_config["syslog-parsers"] = ""
 
     def _set_rule_destination_status(
         self,
@@ -997,8 +1141,19 @@ class AlloyCharm(ops.CharmBase):
         try:
             alloy.ensure_config_dir_permissions(str(Path(DEFAULT_CONFIG_PATH).parent))
             self._prepare_network_pipeline()
+            self._network_features = (
+                NetworkAlertSettings()
+                if str(self.config.get("config-override", "")).strip()
+                else parse_alert_settings(self.config)
+            )
+            self._validate_network_rule_capacity()
             manual_metrics_jobs = self._manual_metrics_scrape_jobs()
-        except (ManualMetricsJobsError, NetworkMonitoringError) as exc:
+        except (
+            ManualMetricsJobsError,
+            NetworkMonitoringError,
+            NetworkAlertsError,
+            SyslogParsersError,
+        ) as exc:
             self._discard_staged_secrets()
             self._stop_network_on_access_failure()
             self.unit.status = ops.BlockedStatus(str(exc))
@@ -1037,6 +1192,7 @@ class AlloyCharm(ops.CharmBase):
             and syslog_receivers_enabled == self._stored.last_syslog_receivers_enabled
         ):
             logger.debug("Alloy config unchanged; skipping apply.")
+            self._commit_network_features()
             return self._post_config_status(
                 "Alloy config updated and valid", manual_metrics_jobs=manual_metrics_jobs
             )
@@ -1060,6 +1216,7 @@ class AlloyCharm(ops.CharmBase):
         self._stored.last_live_debugging = live_debugging
         self._stored.last_syslog_receivers_enabled = syslog_receivers_enabled
         self._commit_network_secrets()
+        self._commit_network_features()
         return self._post_config_status(
             "Alloy config updated and valid", manual_metrics_jobs=manual_metrics_jobs
         )
@@ -1238,6 +1395,7 @@ class AlloyCharm(ops.CharmBase):
             log_source_groups=self._machine_observability_log_source_groups(),
             network_pipeline=self._network_pipeline,
             self_metrics_address=self._self_metrics_address(),
+            syslog_parsers=self._network_features.parsers,
             log_level=str(self.config.get("log-level", "info")),
             collector_id=(
                 self._stored.last_network_collector

@@ -8,7 +8,7 @@ platforms:
   ubuntu@22.04:amd64:
   ubuntu@24.04:amd64:
 
-summary: NetBox-discovered SNMPv3 monitoring with Grafana Alloy on Ubuntu.
+summary: NetBox-discovered SNMPv2c/v3 monitoring with Grafana Alloy on Ubuntu.
 
 description: |
   Grafana Alloy is a vendor-neutral distribution of the OpenTelemetry Collector.
@@ -20,7 +20,7 @@ description: |
 config:
   options:
     network-monitoring-enabled:
-      description: Enable read-only NetBox discovery and embedded SNMPv3 collection.
+      description: Enable read-only NetBox discovery and embedded SNMPv2c/v3 collection.
       type: boolean
       default: false
     netbox-url:
@@ -34,8 +34,8 @@ config:
     snmp-auth:
       description: |
         Juju secret URI or ID containing snmp-yaml with an auths mapping of named
-        SNMPv3 profiles. Devices select a profile through their snmp_auth custom
-        field. Grant the secret to this application. Plaintext credentials are
+        SNMPv2c or SNMPv3 profiles. Devices select a profile through their snmp_auth
+        custom field. Grant the secret to this application. Plaintext credentials are
         not accepted as configuration.
       type: string
       default: ""
@@ -44,7 +44,9 @@ config:
       type: string
       default: Bearer
     netbox-ca:
-      description: Optional Juju secret URI or ID containing a ca-pem field for a private CA.
+      description: |
+        Optional Juju secret URI or ID with ca-pem for a certificate chain not
+        already trusted by the collector. Publicly trusted certificates need none.
       type: string
       default: ""
     netbox-site:
@@ -64,7 +66,10 @@ config:
       type: string
       default: active
     collector-id:
-      description: Stable unique monitoring scope identifier, required when network monitoring is enabled.
+      description: |
+        Stable unique name for this collection scope, required when network
+        monitoring is enabled. Emitted as the collector label on network/self/
+        host metrics and metric rules. Does not filter NetBox inventory.
       type: string
       default: ""
     netbox-refresh-interval:
@@ -79,6 +84,36 @@ config:
       description: SNMP scrape timeout, shorter than the scrape interval.
       type: string
       default: 15s
+    snmp-modules:
+      description: |
+        Default comma-separated embedded Alloy SNMP modules. A device's optional
+        snmp_modules NetBox text custom field replaces this list. Keep that field
+        canonical (no spaces). Credentials still come from snmp_auth.
+      type: string
+      default: system,if_mib
+    network-alerts-enabled:
+      description: Publish collector-owned metric alert rules using send-remote-write.
+      type: boolean
+      default: true
+    network-device-alerts-enabled:
+      description: |
+        Add device health and explicitly selected interface metric alerts.
+        Requires network-alerts-enabled; collection continues when false.
+      type: boolean
+      default: false
+    network-log-alerts-enabled:
+      description: |
+        Publish network event LogQL rules through send-loki-logs for enabled
+        syslog parser profiles. Collection and parsing continue when false.
+      type: boolean
+      default: false
+    network-alerts-config:
+      description: |
+        Optional bounded YAML mapping of named interface scopes and metric/log
+        alert presets. See README for the schema, defaults and examples.
+        Empty uses preset defaults with no interface scopes.
+      type: string
+      default: ""
     log-level:
       description: |
         Configures the log level of the Alloy process.
@@ -134,6 +169,13 @@ config:
         directly to Loki with collector Juju topology and syslog origin labels.
       default: false
       type: boolean
+    syslog-parsers:
+      description: |
+        Optional comma-separated parsing profiles: opnsense_filterlog,cisco_ios.
+        Empty disables body parsing. Parsed fields become structured metadata;
+        original messages and existing labels are preserved. Requires syslog reception.
+      type: string
+      default: ""
     syslog-drop-access-logs:
       description: |
         Drop common request-style remote syslog lines before forwarding them to

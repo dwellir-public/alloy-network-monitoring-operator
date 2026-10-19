@@ -15,8 +15,10 @@ from live_helpers import (
     build_source_fixture,
     emit_logs,
     indexed_log_labels,
+    network_target_modules,
     query,
     rotate_source,
+    set_inventory_modules,
     snapshot,
     start_source,
     wait_for,
@@ -67,7 +69,7 @@ def deployment(artifact):
         current = juju.status()
         if app in current.apps:
             machines = {u.machine for u in current.apps[app].units.values()} - original_machines
-            juju.remove_application(app)
+            juju.remove_application(app, force=True)
             juju.wait(lambda status: app not in status.apps)
             for machine in machines:
                 status = juju.status()
@@ -77,7 +79,7 @@ def deployment(artifact):
                     for u in a.units.values()
                 )
                 if machine and machine in status.machines and not used:
-                    juju.cli("remove-machine", machine)
+                    juju.cli("remove-machine", "--force", "--no-wait", "--no-prompt", machine)
 
 
 def test_artifact_runtime_and_network_destination_gate(deployment):
@@ -281,6 +283,7 @@ def test_live_relations_labels_secrets_and_refresh(backends, deployment, tmp_pat
         assert samples[0]["metric"]["instance"] == "127.0.0.2"
         assert samples[0]["metric"]["netbox_id"] == "1"
         evidence["snmp_up"] = samples
+        _check_network_feature_controls(deployment, backends, evidence)
         if backends["loki"]:
             emit_logs(juju, unit, app + " synthetic log")
             for source in ("remote_syslog", "journal"):
@@ -332,6 +335,22 @@ def test_live_relations_labels_secrets_and_refresh(backends, deployment, tmp_pat
         assert rotated["secret_files"] != generation["secret_files"]
         assert rotated["pid"] == generation["pid"]
         evidence["after_rotation"] = rotated
+        v3_generation = rotated
+        juju.cli(
+            "update-secret",
+            snmp,
+            "snmp-yaml=auths:\n  rotated:\n    version: 2\n    community: fixture-v2c-community\n",
+        )
+        _wait_status(juju, app, "active")
+        rotated = wait_for(
+            lambda: (s := snapshot(juju, unit))
+            and s["secret_files"] != v3_generation["secret_files"]
+            and s["snmp_auth_profiles"] == ["rotated"]
+            and s
+        )
+        assert rotated["pid"] == v3_generation["pid"]
+        assert rotated["storage_path"] == v3_generation["storage_path"]
+        evidence["after_v2c_profile_transition"] = rotated
         juju.config(app, {"log-level": "invalid"})
         _wait_status(juju, app, "blocked")
         rejected = snapshot(juju, unit)
@@ -359,3 +378,86 @@ def test_live_relations_labels_secrets_and_refresh(backends, deployment, tmp_pat
         if source_app in juju.status().apps:
             juju.remove_application(source_app)
             juju.wait(lambda status: source_app not in status.apps)
+
+
+def _check_network_feature_controls(deployment, backends, evidence):
+    """Verify selected modules, metadata and apply recovery on the owned application."""
+    juju, app = deployment.juju, deployment.app
+    unit = next(iter(juju.status().apps[app].units))
+    initial = snapshot(juju, unit)
+    set_inventory_modules(juju, unit, "system,if_mib,cisco_device")
+    wait_for(lambda: network_target_modules(juju, unit) == ["system,if_mib,cisco_device"])
+    set_inventory_modules(juju, unit, "unknown_module")
+    invalid = wait_for(
+        lambda: query(
+            backends["mimir_query"],
+            f'up{{job="snmp/network",juju_application="{app}",'
+            'snmp_config_error="invalid_modules"}',
+        )
+    )
+    assert invalid[0]["value"][1] == "0"
+    set_inventory_modules(juju, unit, "")
+    wait_for(lambda: network_target_modules(juju, unit) == ["system,if_mib"])
+    assert snapshot(juju, unit)["pid"] == initial["pid"]
+    evidence["module_changes_without_restart"] = True
+    if not backends["loki"]:
+        return
+    juju.config(
+        app,
+        {
+            "syslog-parsers": "opnsense_filterlog,cisco_ios",
+            "network-device-alerts-enabled": True,
+            "network-log-alerts-enabled": True,
+            "network-alerts-config": "interfaces: [{name: expected, include: wan}]",
+        },
+    )
+    _wait_status(juju, app, "active")
+    selector = '{juju_application="' + app + '",log_source="remote_syslog"}'
+    events = [
+        (
+            "filterlog",
+            "100,,,123,igb0,match,block,in,4,0x0,,64,0,0,none,6,tcp,60,"
+            "192.0.2.1,198.51.100.1,12345,443,0,S,,,65535,,",
+            'event_vendor="opnsense" | event_dst_port="443"',
+        ),
+        (
+            "ios",
+            "%LINK-3-UPDOWN: Interface TenGigabitEthernet1/1, changed state to down",
+            'event_vendor="cisco" | event_interface="TenGigabitEthernet1/1"',
+        ),
+    ]
+    for application, message, filters in events:
+        emit_logs(juju, unit, message, application=application)
+        samples = wait_for(
+            lambda: query(backends["loki_query"], selector + " | " + filters, logs=True)
+        )
+        assert any(value[1] == message for sample in samples for value in sample["values"])
+    labels = indexed_log_labels(backends["loki_query"], selector)
+    assert labels and all(len(item) <= 15 for item in labels)
+    assert all(not any(key.startswith("event_") for key in item) for item in labels)
+    applied = snapshot(juju, unit)
+    assert applied["pid"] == initial["pid"]
+    juju.config(app, {"network-alerts-enabled": False, "network-log-alerts-enabled": False})
+    _wait_status(juju, app, "active")
+    disabled = snapshot(juju, unit)
+    assert disabled["config_sha256"] == applied["config_sha256"]
+    assert disabled["pid"] == applied["pid"]
+    juju.config(app, {"syslog-parsers": "unknown"})
+    _wait_status(juju, app, "blocked")
+    rejected = snapshot(juju, unit)
+    assert rejected["config_sha256"] == disabled["config_sha256"]
+    juju.config(
+        app,
+        {
+            "syslog-parsers": "",
+            "network-alerts-enabled": True,
+            "network-device-alerts-enabled": False,
+            "network-alerts-config": "",
+        },
+    )
+    _wait_status(juju, app, "active")
+    assert snapshot(juju, unit)["pid"] == initial["pid"]
+    evidence["parser_events"] = [application for application, _, _ in events]
+    evidence["parser_indexed_labels"] = labels
+    evidence["alert_flags_leave_collection_unchanged"] = True
+    evidence["invalid_parser_retains_applied_config"] = True

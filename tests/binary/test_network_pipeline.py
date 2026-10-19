@@ -2,20 +2,29 @@
 
 import json
 import os
+import shutil
 import socket
 import subprocess
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, cast
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
 from urllib.request import urlopen
 
 import pytest
 
 import alloy
 from config_builder import ConfigBuilder, LogSourceGroup, MetricsScrapeJob, ScrapeTarget
-from network_monitoring import NetworkPipeline, NetworkSettings, render_network_blocks
+from network_monitoring import (
+    NetworkPipeline,
+    NetworkSettings,
+    parse_snmp_authentications,
+    read_snmp_module_errors,
+    render_network_blocks,
+)
+from snmp_modules import INVALID_MODULE
 
 BINARY = os.environ.get("ALLOY_BINARY", "")
 pytestmark = pytest.mark.skipif(not BINARY, reason="Set ALLOY_BINARY to a tested Alloy executable")
@@ -124,6 +133,7 @@ def running_alloy(tmp_path, server):
         "  cisco:\n    version: 3\n    username: switch\n"
         "    security_level: authNoPriv\n    auth_protocol: SHA\n"
         "    password: fixture-cisco-password\n"
+        "  legacy_v2c:\n    version: 2\n    community: fixture-v2-community\n"
     )
     settings = NetworkSettings(
         discovery_url=server["url"] + "/devices/?site=home&tag=snmp&tag=edge",
@@ -136,7 +146,8 @@ def running_alloy(tmp_path, server):
         scrape_interval="3s",
         scrape_timeout="1s",
     )
-    pipeline = NetworkPipeline(settings, ("opnsense", "cisco"), str(token), str(auth))
+    profiles = parse_snmp_authentications({"snmp-yaml": auth.read_text()})
+    pipeline = NetworkPipeline(settings, profiles.names, str(token), str(auth))
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))
         address = f"127.0.0.1:{listener.getsockname()[1]}"
@@ -240,6 +251,45 @@ def test_dynamic_inventory_identity_and_failure_semantics(server, running_alloy)
     assert process.pid == pid and process.poll() is None
 
 
+def test_device_module_selection_changes_and_invalid_selection_is_observable(
+    server, running_alloy
+):
+    url, process, _, _ = running_alloy
+    server["inventory"] = [
+        device(__meta_netbox_custom_field_snmp_modules="system,if_mib,cisco_device")
+    ]
+    selected = wait_for(lambda: targets(url))
+    assert selected[0]["__param_module"] == "system,if_mib,cisco_device"
+    assert "snmp_config_error" not in selected[0]
+    pid = process.pid
+    server["inventory"] = [device(__meta_netbox_custom_field_snmp_modules="not_loaded")]
+    invalid = wait_for(lambda: next((t for t in targets(url) if t.get("snmp_config_error")), None))
+    assert invalid["snmp_config_error"] == "invalid_modules"
+    assert invalid["__param_module"] == INVALID_MODULE
+    assert read_snmp_module_errors(url.removeprefix("http://")) == ("123",)
+    query = f"?target=127.0.0.2&auth=opnsense&module={INVALID_MODULE}"
+    with pytest.raises(HTTPError) as error:
+        urlopen(url + invalid["__metrics_path__"] + query, timeout=2)
+    assert b"Unknown module" in error.value.read()
+    assert process.pid == pid and process.poll() is None
+    for index, empty in enumerate(("", "None", "null"), start=400):
+        server["inventory"] = [device(str(index), __meta_netbox_custom_field_snmp_modules=empty)]
+        restored = wait_for(
+            lambda: next(
+                (
+                    t
+                    for t in targets(url)
+                    if not t.get("snmp_config_error")
+                    and t.get("netbox_id") == str(index)
+                    and t.get("__param_module") == "system,if_mib"
+                ),
+                None,
+            )
+        )
+        assert restored["__param_module"] == "system,if_mib"
+        assert read_snmp_module_errors(url.removeprefix("http://")) == ()
+
+
 def test_second_authentication_profile_and_credential_redaction(server, running_alloy):
     url, _, _, _ = running_alloy
     server["inventory"] = [device(__meta_netbox_custom_field_snmp_auth="cisco")]
@@ -257,6 +307,69 @@ def test_second_authentication_profile_and_credential_redaction(server, running_
         output = response.read().decode()
         assert "fixture-auth-password" not in output
         assert "fixture-privacy-password" not in output
+        assert "fixture-v2-community" not in output
+
+
+@pytest.fixture
+def snmp_v2c_agent(tmp_path):
+    binary = os.environ.get("SNMPD_BINARY") or shutil.which("snmpd")
+    if not binary:
+        pytest.skip("Install snmpd or set SNMPD_BINARY for actual SNMPv2c polling")
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        address = f"127.0.0.1:{listener.getsockname()[1]}"
+    config = tmp_path / "agent.conf"
+    config.write_text(
+        "rocommunity fixture-v2-community 127.0.0.1\n"
+        "sysLocation alloy-v2c-fixture\nsysName alloy-v2c-fixture\n"
+    )
+    env = {
+        **os.environ,
+        "SNMPCONFPATH": str(tmp_path),
+        "SNMP_PERSISTENT_DIR": str(tmp_path / "agent-state"),
+        "MIBS": "",
+    }
+    with (tmp_path / "agent.log").open("w") as log:
+        process = subprocess.Popen(
+            [binary, "-f", "-Lo", "-C", "-c", str(config), "udp:" + address],
+            env=env,
+            stdout=log,
+            stderr=log,
+        )
+        try:
+            yield address, process
+        finally:
+            process.terminate()
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+
+
+def test_v2c_profile_selects_and_polls_a_local_agent(server, running_alloy, snmp_v2c_agent):
+    url, process, _, _ = running_alloy
+    address, agent = snmp_v2c_agent
+    server["inventory"] = [device(__meta_netbox_custom_field_snmp_auth="legacy_v2c")]
+    selected = wait_for(lambda: targets(url))
+    target = selected[0]
+    assert target["__param_auth"] == "legacy_v2c"
+    assert target["instance"] == "127.0.0.2"
+    assert target["juju_application"] == TOPOLOGY["juju_application"]
+    parameters = urlencode({"target": address, "auth": target["__param_auth"], "module": "system"})
+
+    def collected():
+        assert agent.poll() is None, "Isolated SNMP agent exited unexpectedly"
+        with urlopen(url + target["__metrics_path__"] + "?" + parameters, timeout=10) as response:
+            return response.read().decode()
+
+    metrics = wait_for(collected)
+    assert "sysUpTime " in metrics
+    assert 'sysLocation="alloy-v2c-fixture"' in metrics
+    assert "fixture-v2-community" not in metrics
+    with urlopen(url + "/api/v0/web/components/local.file.network_snmp_auth", timeout=2) as r:
+        assert "fixture-v2-community" not in r.read().decode()
+    assert process.poll() is None
 
 
 def test_malformed_config_reload_retains_previous_pipeline(server, running_alloy):

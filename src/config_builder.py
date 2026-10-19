@@ -12,6 +12,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 from network_monitoring import NetworkPipeline, render_network_blocks
+from network_syslog import render_syslog_parser_stages
 from outbound_endpoints import OutboundEndpoint
 
 DEFAULT_CONFIG_DIR = "/etc/alloy"
@@ -123,6 +124,7 @@ class ConfigBuilder:
         self_metrics_address: str = "127.0.0.1:6987",
         log_level: str = "info",
         collector_id: str = "",
+        syslog_parsers: tuple[str, ...] = (),
     ):
         self._loki_endpoints = loki_endpoints
         self._remote_write_endpoints = remote_write_endpoints
@@ -138,6 +140,7 @@ class ConfigBuilder:
         self._syslog_rate_burst = syslog_rate_burst
         self._receiver_hostname = receiver_hostname
         self._receiver_ip = receiver_ip
+        self._syslog_parsers = syslog_parsers
         self._topology_labels = topology_labels
         self._log_source_groups = log_source_groups or []
         self._network_pipeline = network_pipeline
@@ -567,6 +570,7 @@ class ConfigBuilder:
                 "",
             ]
         )
+        lines.extend(render_syslog_parser_stages(self._syslog_parsers))
         for expression in self._effective_syslog_drop_expressions():
             lines.extend(
                 [
