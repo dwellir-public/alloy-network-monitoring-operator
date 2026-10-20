@@ -152,8 +152,8 @@ def test_start_clears_legacy_remote_write_metadata(monkeypatch):
     assert relation_out.local_app_data["alert_rules"] == '{"groups":[]}'
     metadata = json.loads(relation_out.local_app_data["metadata"])
     assert set(metadata) == {"application", "model", "model_uuid", "unit"}
-    assert metadata["application"] == "alloy-network-monitoring"
-    assert metadata["unit"] == "alloy-network-monitoring/0"
+    assert metadata["application"] == "alloy-nm"
+    assert metadata["unit"] == "alloy-nm/0"
     assert metadata["model"] != "legacy-model"
     assert metadata["model_uuid"] != "legacy-uuid"
 
@@ -566,8 +566,8 @@ def test_journal_match_expressions_render_with_collector_topology(monkeypatch):
     host_section = rendered.split('loki.source.journal "host_journald_0" {', 1)[1].split(
         'loki.process "juju" {', 1
     )[0]
-    assert 'juju_application = "alloy-network-monitoring"' in host_section
-    assert 'juju_unit = "alloy-network-monitoring/0"' in host_section
+    assert 'juju_application = "alloy-nm"' in host_section
+    assert 'juju_unit = "alloy-nm/0"' in host_section
 
 
 def test_syslog_receiver_relation_publishes_ready_receiver(monkeypatch):
@@ -1184,7 +1184,7 @@ def test_manual_metrics_jobs_render_with_remote_write(monkeypatch):
     assert 'job_name = "external-node-exporter"' in rendered
     assert "insecure_skip_verify = true" in rendered
     assert 'env = "prod"' in rendered
-    assert 'juju_application = "alloy-network-monitoring"' in rendered
+    assert 'juju_application = "alloy-nm"' in rendered
     assert state_out.unit_status == testing.ActiveStatus("Alloy config updated and valid")
 
 

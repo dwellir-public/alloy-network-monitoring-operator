@@ -1,5 +1,5 @@
 [project]
-name = "alloy-network-monitoring"
+name = "alloy-nm"
 version = "0.0.1"
 requires-python = ">=3.10"
 

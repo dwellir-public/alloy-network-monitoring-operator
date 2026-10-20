@@ -62,12 +62,12 @@ charmcraft pack --platform ubuntu@22.04:amd64
 charmcraft pack --platform ubuntu@24.04:amd64
 ```
 
-Expected artifacts are `alloy-network-monitoring_ubuntu@22.04-amd64.charm` and
-`alloy-network-monitoring_ubuntu@24.04-amd64.charm`. Verify each built inventory:
+Expected artifacts are `alloy-nm_ubuntu@22.04-amd64.charm` and
+`alloy-nm_ubuntu@24.04-amd64.charm`. Verify each built inventory:
 
 ```bash
 python3 tools/dependency_bom.py \
-  --artifact alloy-network-monitoring_ubuntu@24.04-amd64.charm \
+  --artifact alloy-nm_ubuntu@24.04-amd64.charm \
   --base ubuntu@24.04 --arch amd64 --output build/runtime-24.cdx.json
 ```
 
@@ -84,7 +84,7 @@ and removes that application at the end. It does not remove the model.
 ```bash
 TEST_MODEL=controller:alloy-lab \
 TEST_MODEL_IS_NONPRODUCTION=yes \
-CHARM_PATH=./alloy-network-monitoring_ubuntu@24.04-amd64.charm \
+CHARM_PATH=./alloy-nm_ubuntu@24.04-amd64.charm \
 TEST_BASE=ubuntu@24.04 \
 uv run pytest tests/integration -q
 ```
@@ -99,7 +99,7 @@ already available in the selected nonproduction model and their query URLs:
 ```bash
 TEST_MODEL=controller:alloy-lab \
 TEST_MODEL_IS_NONPRODUCTION=yes \
-CHARM_PATH=./alloy-network-monitoring_ubuntu@24.04-amd64.charm \
+CHARM_PATH=./alloy-nm_ubuntu@24.04-amd64.charm \
 PREVIOUS_CHARM_PATH=/path/to/previous-24.04.charm \
 TEST_BASE=ubuntu@24.04 \
 TEST_REMOTE_WRITE_PROVIDER=mimir:receive-remote-write \

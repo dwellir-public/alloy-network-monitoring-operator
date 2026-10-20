@@ -14,11 +14,11 @@ jobs:
           - runner: ubuntu-22.04
             base: ubuntu@22.04
             platform: ubuntu@22.04:amd64
-            artifact: alloy-network-monitoring_ubuntu@22.04-amd64.charm
+            artifact: alloy-nm_ubuntu@22.04-amd64.charm
           - runner: ubuntu-24.04
             base: ubuntu@24.04
             platform: ubuntu@24.04:amd64
-            artifact: alloy-network-monitoring_ubuntu@24.04-amd64.charm
+            artifact: alloy-nm_ubuntu@24.04-amd64.charm
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6

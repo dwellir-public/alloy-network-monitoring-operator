@@ -359,8 +359,8 @@ def test_v3_rules_and_telemetry_publish_to_standard_relations_with_principal_top
     loki_data = harness.get_relation_data(loki, harness.charm.app.name)
     assert len(json.loads(prometheus_data["alert_rules"])["groups"]) == 1
     assert len(json.loads(loki_data["alert_rules"])["groups"]) == 1
-    assert json.loads(prometheus_data["metadata"])["application"] == "alloy-network-monitoring"
-    assert json.loads(loki_data["metadata"])["application"] == "alloy-network-monitoring"
+    assert json.loads(prometheus_data["metadata"])["application"] == "alloy-nm"
+    assert json.loads(loki_data["metadata"])["application"] == "alloy-nm"
 
 
 def test_config_changed_republishes_prometheus_and_loki_rules_after_consumers(monkeypatch):

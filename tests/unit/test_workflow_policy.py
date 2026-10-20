@@ -56,8 +56,8 @@ def test_release_is_manual_main_only_and_serialized():
 
 def test_release_preserves_base_artifacts_and_only_edge():
     text = RELEASE_WORKFLOW.read_text()
-    assert "./alloy-network-monitoring_ubuntu@22.04-amd64.charm" in text
-    assert "./alloy-network-monitoring_ubuntu@24.04-amd64.charm" in text
+    assert "./alloy-nm_ubuntu@22.04-amd64.charm" in text
+    assert "./alloy-nm_ubuntu@24.04-amd64.charm" in text
     commands = re.findall(r"^\s*[^#\n]*charmcraft\s+(?:upload|release)[^\n]*$", text, re.MULTILINE)
     assert len(commands) == 2
     assert all("upload" in command and "--release latest/edge" in command for command in commands)

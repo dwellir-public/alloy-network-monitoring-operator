@@ -1,4 +1,4 @@
-# Developing alloy-network-monitoring
+# Developing alloy-nm
 
 Run commands from the checkout root. See the
 [architecture guide](docs/charm-architecture.md) for runtime boundaries and the

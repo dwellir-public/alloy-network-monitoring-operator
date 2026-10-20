@@ -1,4 +1,4 @@
-# alloy-network-monitoring
+# alloy-nm
 
 A Juju machine charm that discovers devices in NetBox, collects SNMPv2c/v3 metrics
 with Grafana Alloy, and forwards metrics to Mimir and logs to Loki. It also keeps
@@ -27,9 +27,9 @@ deploy the artifact for your Ubuntu base. Substitute your existing backend
 application names in the relations:
 
 ```bash
-juju deploy ./alloy-network-monitoring_ubuntu@24.04-amd64.charm --base ubuntu@24.04
-juju relate alloy-network-monitoring:send-remote-write mimir-vm:receive-remote-write
-juju relate alloy-network-monitoring:send-loki-logs loki-vm:loki_push_api
+juju deploy ./alloy-nm_ubuntu@24.04-amd64.charm --base ubuntu@24.04
+juju relate alloy-nm:send-remote-write mimir-vm:receive-remote-write
+juju relate alloy-nm:send-loki-logs loki-vm:loki_push_api
 ```
 
 Metrics need a remote-write destination, supplied by `send-remote-write` or
@@ -58,8 +58,8 @@ juju add-secret netbox-token 'token#file=./netbox-token.txt'
 juju add-secret snmp-auth 'snmp-yaml#file=./snmp_auth.yaml'
 
 # Use the secret references returned by the commands above.
-juju grant-secret secret:NETBOX-ID alloy-network-monitoring
-juju grant-secret secret:SNMP-ID alloy-network-monitoring
+juju grant-secret secret:NETBOX-ID alloy-nm
+juju grant-secret secret:SNMP-ID alloy-nm
 ```
 
 `netbox-token` and `snmp-auth` are Juju secret references, never passwords in Juju
@@ -124,8 +124,8 @@ For those deployments, create and grant the optional CA secret:
 
 ```bash
 juju add-secret netbox-ca 'ca-pem#file=./netbox-ca.pem'
-juju grant-secret secret:CA-ID alloy-network-monitoring
-juju config alloy-network-monitoring netbox-ca=secret:CA-ID
+juju grant-secret secret:CA-ID alloy-nm
+juju config alloy-nm netbox-ca=secret:CA-ID
 ```
 
 ### 3. Enable discovery
@@ -141,7 +141,7 @@ version-compatibility instructions. It exposes
 Replace `<...>` placeholders in the following examples with your own values:
 
 ```bash
-juju config alloy-network-monitoring \
+juju config alloy-nm \
   network-monitoring-enabled=true \
   collector-id='<collector-name>' \
   netbox-url=https://netbox.example \
@@ -169,7 +169,7 @@ Use letters, numbers, dots, dashes or underscores, with at most 64 characters.
 Site, region and tags are **independently optional**:
 
 ```bash
-juju config alloy-network-monitoring \
+juju config alloy-nm \
   netbox-site='<site-name>' \
   netbox-region='<region-name>' \
   netbox-tags='<tag-name>,<another-tag-name>'
@@ -222,7 +222,7 @@ The default is `system,if_mib`, providing device uptime and interface metrics.
 Change the default for devices without an override:
 
 ```bash
-juju config alloy-network-monitoring snmp-modules=system,if_mib
+juju config alloy-nm snmp-modules=system,if_mib
 ```
 
 Add an optional NetBox **text** custom field named **`snmp_modules`** to devices.
@@ -297,7 +297,7 @@ apcups arista_sw cisco_device cisco_fc_fe cisco_imc cisco_wlc cyberpower
 Enable the existing TCP and UDP listeners on port **1514**, then select parsers:
 
 ```bash
-juju config alloy-network-monitoring \
+juju config alloy-nm \
   enable-syslogreceivers=true \
   syslog-parsers=opnsense_filterlog,cisco_ios
 ```
@@ -382,8 +382,8 @@ metric samples and log entries.
 For direct backend connections:
 
 ```bash
-juju relate alloy-network-monitoring:send-remote-write mimir-vm:receive-remote-write
-juju relate alloy-network-monitoring:send-loki-logs loki-vm:loki_push_api
+juju relate alloy-nm:send-remote-write mimir-vm:receive-remote-write
+juju relate alloy-nm:send-loki-logs loki-vm:loki_push_api
 ```
 
 The receiving charm must consume and install the rules, with its ruler enabled
@@ -414,7 +414,7 @@ forwarded using their own source identity.
 Enable the new rule families:
 
 ```bash
-juju config alloy-network-monitoring \
+juju config alloy-nm \
   network-device-alerts-enabled=true \
   network-log-alerts-enabled=true
 ```
@@ -458,7 +458,7 @@ logs:
 Apply this YAML as a Juju **string** option:
 
 ```bash
-juju config alloy-network-monitoring network-alerts-config="$(cat ./network-alerts.yaml)"
+juju config alloy-nm network-alerts-config="$(cat ./network-alerts.yaml)"
 ```
 
 Scope fields:
@@ -554,7 +554,7 @@ The Alloy host exporter observes the Alloy machine.
 Save that list to a file and apply it:
 
 ```bash
-juju config alloy-network-monitoring manual-metrics-jobs="$(cat ./metrics-jobs.yaml)"
+juju config alloy-nm manual-metrics-jobs="$(cat ./metrics-jobs.yaml)"
 ```
 
 Each job accepts only these fields:
@@ -572,8 +572,8 @@ Each job accepts only these fields:
 
 ## All Juju configuration options
 
-Use `juju config alloy-network-monitoring` to inspect current values and
-`juju config alloy-network-monitoring OPTION=VALUE` to change one. Empty strings
+Use `juju config alloy-nm` to inspect current values and
+`juju config alloy-nm OPTION=VALUE` to change one. Empty strings
 below mean the option is unset. YAML examples above are passed as string values.
 
 ### Network discovery and SNMP
@@ -652,17 +652,17 @@ withdraws that provider's rules. Collector alert flags do not affect providers.
 For colocated principals:
 
 ```bash
-juju relate alloy-network-monitoring:machine-observability op-node:machine-observability
-juju relate alloy-network-monitoring:machine-observability op-reth:machine-observability
+juju relate alloy-nm:machine-observability op-node:machine-observability
+juju relate alloy-nm:machine-observability op-reth:machine-observability
 ```
 
 If you use gateways, retain their separate backend and rule-forwarding relations:
 
 ```bash
-juju relate alloy-network-monitoring:send-remote-write mimir-gateway-vm:receive-remote-write
+juju relate alloy-nm:send-remote-write mimir-gateway-vm:receive-remote-write
 juju relate mimir-gateway-vm:mimir-alert-rules mimir-vm:receive-remote-write
 juju relate mimir-gateway-vm:backend mimir-vm:backend
-juju relate alloy-network-monitoring:send-loki-logs loki-loadbalancer-vm:loki_push_api
+juju relate alloy-nm:send-loki-logs loki-loadbalancer-vm:loki_push_api
 juju relate loki-loadbalancer-vm:loki-alert-rules loki-vm:loki_push_api
 juju relate loki-loadbalancer-vm:ingress loki-vm:ingress
 ```
@@ -670,7 +670,7 @@ juju relate loki-loadbalancer-vm:ingress loki-vm:ingress
 For Grafana Cloud, relate your configured integrator:
 
 ```bash
-juju relate alloy-network-monitoring:grafana-cloud-config grafana-cloud-integrator:grafana-cloud-config
+juju relate alloy-nm:grafana-cloud-config grafana-cloud-integrator:grafana-cloud-config
 ```
 
 Cloud destinations are additive to plain remote-write/Loki relations. Credentials
