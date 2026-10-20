@@ -152,8 +152,11 @@ Raw metadata and incoming internal routing labels are discarded before the
 embedded exporter constructs its own scrape targets.
 
 Samples use `job="snmp/network"`, `instance` set to the target's primary IPv4
-(for example, `192.0.2.1`), `netbox_id`, `device`, actual `site`, and
-`collector`. SNMP samples also carry `juju_model`, `juju_model_uuid`,
+(for example, `192.0.2.1`), `netbox_id`, `device`, actual `site`, the device's role
+slug as optional `role`, and `collector`. The role comes from
+`__meta_netbox_role_slug`, rather than its display name, and updates on discovery
+refresh without restarting Alloy. Missing or empty roles do not exclude a
+device; the label is omitted. SNMP samples also carry `juju_model`, `juju_model_uuid`,
 `juju_application`, `juju_unit` and `juju_charm` for the collector. These identify
 where collection happened; NetBox labels identify the device. Original `ifName`, `ifDescr`, `ifAlias` and
 `ifIndex` labels remain exporter observations. SNMP diagnostic metrics are kept.

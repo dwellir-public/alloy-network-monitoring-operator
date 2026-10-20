@@ -156,6 +156,15 @@ results; a source-level refresh test alone does not prove live continuity.
 
 ## Current verification scope
 
+The optional NetBox role-label change on 2026-10-20 passed 420 unit tests and
+10 native pipeline/rule tests. Native discovery checks verify the role slug,
+live role changes, and empty/missing role removal while retaining the target and
+Alloy process. Lint, formatting, types and provenance passed, and both Ubuntu
+amd64 artifacts rebuilt with matching sources and unchanged relation contracts.
+The backend fixture now checks the role on ingested SNMP diagnostics; its two
+guarded integration tests skipped without a selected nonproduction model.
+This change has not been deployed to a live Mimir/Loki stack.
+
 The configured-location-label change on 2026-10-19 passed 420 unit tests and
 14 native Alloy/Prometheus tests, including four checks of forwarded location
 labels. Lint, formatting, type and provenance checks passed. Both Ubuntu amd64

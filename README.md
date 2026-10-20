@@ -203,6 +203,16 @@ up{job="snmp/network", site="<site-name>", region="<region-name>"}
 {log_source="remote_syslog", site="<site-name>", region="<region-name>"}
 ```
 
+Managed SNMP targets also carry the device's NetBox **role slug** as `role`,
+such as `edge-router`. This uses the per-device `__meta_netbox_role_slug`
+discovery metadata and needs no extra Juju configuration. Devices with no role
+slug still collect normally, without a `role` label. Role changes appear after
+the next discovery refresh; historical samples keep their previous labels.
+
+```promql
+up{job="snmp/network", role="edge-router"}
+```
+
 The default authentication scheme is `Bearer` for NetBox v2 tokens; use
 `netbox-auth-scheme=Token` for v1 tokens. The charm adds this prefix itself.
 
