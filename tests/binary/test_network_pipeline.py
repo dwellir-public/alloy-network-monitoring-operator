@@ -33,7 +33,7 @@ TOPOLOGY = {
     "juju_model_uuid": "00000000-0000-4000-8000-000000000001",
     "juju_application": "fixture-collector",
     "juju_unit": "fixture-collector/0",
-    "juju_charm": "alloy-network-monitoring",
+    "juju_charm": "alloy-nm",
 }
 
 

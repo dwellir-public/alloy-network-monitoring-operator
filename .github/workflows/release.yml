@@ -34,7 +34,7 @@ jobs:
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: charm-ubuntu-22-amd64
-          path: ./alloy-network-monitoring_ubuntu@22.04-amd64.charm
+          path: ./alloy-nm_ubuntu@22.04-amd64.charm
           if-no-files-found: error
 
   build-ubuntu-24:
@@ -59,7 +59,7 @@ jobs:
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: charm-ubuntu-24-amd64
-          path: ./alloy-network-monitoring_ubuntu@24.04-amd64.charm
+          path: ./alloy-nm_ubuntu@24.04-amd64.charm
           if-no-files-found: error
 
   release:
@@ -98,7 +98,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          output="$(charmcraft upload --format json --release latest/edge ./alloy-network-monitoring_ubuntu@22.04-amd64.charm)"
+          output="$(charmcraft upload --format json --release latest/edge ./alloy-nm_ubuntu@22.04-amd64.charm)"
           echo "$output"
 
           revision="$(python3 -c 'import json, sys; print(json.loads(sys.stdin.read())["revision"])' <<< "$output")"
@@ -116,7 +116,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          output="$(charmcraft upload --format json --release latest/edge ./alloy-network-monitoring_ubuntu@24.04-amd64.charm)"
+          output="$(charmcraft upload --format json --release latest/edge ./alloy-nm_ubuntu@24.04-amd64.charm)"
           echo "$output"
 
           revision="$(python3 -c 'import json, sys; print(json.loads(sys.stdin.read())["revision"])' <<< "$output")"
@@ -223,5 +223,5 @@ jobs:
           make_latest: false
           fail_on_unmatched_files: true
           files: |
-            ./alloy-network-monitoring_ubuntu@22.04-amd64.charm
-            ./alloy-network-monitoring_ubuntu@24.04-amd64.charm
+            ./alloy-nm_ubuntu@22.04-amd64.charm
+            ./alloy-nm_ubuntu@24.04-amd64.charm

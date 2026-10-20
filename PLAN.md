@@ -8,7 +8,7 @@ netbox-hardware-sync
     Manually invoked
     Updates selected inventory fields
 
-alloy-network-monitoring
+alloy-nm
     NetBox → target discovery
     Devices → SNMP metrics → Mimir
     Runs continuously
@@ -527,7 +527,7 @@ Start with an explicit “no network targets for this collector” safeguard and
 For the proof of concept, keep the repository small:
 
 ```text
-alloy-network-monitoring/
+alloy-nm-operator/
 ├── README.md
 ├── .gitignore
 ├── versions.toml

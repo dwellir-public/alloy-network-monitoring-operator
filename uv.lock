@@ -7,7 +7,7 @@ resolution-markers = [
 ]
 
 [[package]]
-name = "alloy-network-monitoring"
+name = "alloy-nm"
 version = "0.0.1"
 source = { virtual = "." }
 dependencies = [

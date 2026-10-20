@@ -8,9 +8,9 @@ from config_builder import ConfigBuilder, FileLogSource, LogSourceGroup
 TOPOLOGY = {
     "juju_model": "alloy-model",
     "juju_model_uuid": "00000000-0000-4000-8000-000000000001",
-    "juju_application": "alloy-vm",
-    "juju_unit": "alloy-vm/0",
-    "juju_charm": "alloy-vm",
+    "juju_application": "alloy-nm",
+    "juju_unit": "alloy-nm/0",
+    "juju_charm": "alloy-nm",
 }
 
 

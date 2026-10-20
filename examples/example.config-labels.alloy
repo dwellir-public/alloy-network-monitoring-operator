@@ -32,9 +32,9 @@ loki.process "juju" {
     values = {
       juju_model       = "loki-dev-phase0-2",
       juju_model_uuid  = "5f4407f5-dc26-434c-8c64-25895d72e442",
-      juju_application = "alloy-vm",
-      juju_unit        = "alloy-vm/0",
-      juju_charm       = "alloy-vm",
+      juju_application = "alloy-nm",
+      juju_unit        = "alloy-nm/0",
+      juju_charm       = "alloy-nm",
       service_name     = "alloy-example.service",
     }
   }

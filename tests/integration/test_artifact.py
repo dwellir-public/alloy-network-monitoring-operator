@@ -161,7 +161,7 @@ def test_live_relations_labels_secrets_and_refresh(backends, deployment, tmp_pat
         "juju_model_uuid": model["model-uuid"],
         "juju_application": app,
         "juju_unit": unit,
-        "juju_charm": "alloy-network-monitoring",
+        "juju_charm": "alloy-nm",
     }
     location_labels = {"site": "fixture", "region": "fixture-region"}
     start_source(juju, unit)

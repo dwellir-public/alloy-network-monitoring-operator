@@ -583,8 +583,8 @@ def test_network_alerts_use_existing_payload_and_device_scope(runtime):
         "NetworkCollectorDiskLow",
     }
     assert all(rule["labels"]["collector"] == "lab" for rule in rules)
-    assert all('juju_application="alloy-network-monitoring"' in rule["expr"] for rule in rules)
-    assert all(rule["labels"]["juju_application"] == "alloy-network-monitoring" for rule in rules)
+    assert all('juju_application="alloy-nm"' in rule["expr"] for rule in rules)
+    assert all(rule["labels"]["juju_application"] == "alloy-nm" for rule in rules)
 
 
 def test_override_preserves_referenced_managed_files(runtime):

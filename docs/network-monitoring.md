@@ -1,6 +1,6 @@
 # NetBox and SNMPv2c/v3 monitoring
 
-`alloy-network-monitoring` installs Grafana Alloy and continuously reads device
+`alloy-nm` installs Grafana Alloy and continuously reads device
 inventory from NetBox's Prometheus service-discovery plugin. Alloy polls selected
 devices using its embedded SNMP exporter and forwards samples to the existing
 remote-write destinations. It never writes to NetBox.
@@ -39,9 +39,9 @@ juju add-secret netbox-token 'token#file=./netbox-token.txt'
 juju add-secret snmp-auth 'snmp-yaml#file=./snmp_auth.yaml'
 
 # Substitute the secret IDs returned by the two commands above.
-juju grant-secret secret:NETBOX-ID alloy-network-monitoring
-juju grant-secret secret:SNMP-ID alloy-network-monitoring
-juju config alloy-network-monitoring \
+juju grant-secret secret:NETBOX-ID alloy-nm
+juju grant-secret secret:SNMP-ID alloy-nm
+juju config alloy-nm \
   network-monitoring-enabled=true \
   collector-id='<collector-name>' \
   netbox-url=https://netbox.example \
@@ -53,7 +53,7 @@ The example deliberately leaves site, region and tags empty. Each is optional
 and independent. Set any desired filters:
 
 ```bash
-juju config alloy-network-monitoring \
+juju config alloy-nm \
   netbox-site='<site-name>' \
   netbox-region='<region-name>' \
   netbox-tags='<tag-name>,<another-tag-name>'
@@ -92,8 +92,8 @@ private NetBox CA:
 
 ```bash
 juju add-secret netbox-ca 'ca-pem#file=./netbox-ca.pem'
-juju grant-secret secret:CA-ID alloy-network-monitoring
-juju config alloy-network-monitoring netbox-ca=secret:CA-ID
+juju grant-secret secret:CA-ID alloy-nm
+juju config alloy-nm netbox-ca=secret:CA-ID
 ```
 
 ## Multiple authentications

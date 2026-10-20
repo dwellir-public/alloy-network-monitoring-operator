@@ -1,4 +1,4 @@
-# SNMPv2c/v3 authentication template for alloy-network-monitoring.
+# SNMPv2c/v3 authentication template for alloy-nm.
 # Copy this file outside the checkout and replace the placeholder credentials.
 # Upload it as the snmp-yaml field of the secret referenced by snmp-auth.
 # Each NetBox device's snmp_auth custom field selects a profile name below.
