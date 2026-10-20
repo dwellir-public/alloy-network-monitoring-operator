@@ -36,6 +36,15 @@ def runtime(tmp_path, monkeypatch):
     monkeypatch.setattr(charm, "DEFAULT_CONFIG_BACKUP_PATH", str(tmp_path / "config.bak"))
     monkeypatch.setattr(alloy, "DEFAULT_CONFIG_PATH", str(config_path))
     monkeypatch.setattr(alloy, "DEFAULT_SYSTEMD_DEFAULTS_PATH", str(defaults_path))
+    read_args, write_args = alloy.read_custom_args, alloy.write_custom_args
+    monkeypatch.setattr(
+        alloy, "read_custom_args", lambda **_: read_args(defaults_path=defaults_path)
+    )
+    monkeypatch.setattr(
+        alloy,
+        "write_custom_args",
+        lambda value, **_: write_args(value, defaults_path=defaults_path),
+    )
     monkeypatch.setattr(secret_files, "DEFAULT_SECRET_DIR", tmp_path / "secrets")
     monkeypatch.setattr(alloy, "verify_config", lambda **_: None)
     monkeypatch.setattr(alloy, "ensure_config_dir_permissions", lambda *_: None)
@@ -78,6 +87,165 @@ def applied(state):
 def rule_payload(state, endpoint):
     relation = next(item for item in state.relations if item.endpoint == endpoint)
     return json.loads(relation.local_app_data["alert_rules"])["groups"]
+
+
+def test_cisco_headers_manage_validation_stability_and_reload_boundaries(runtime, monkeypatch):
+    ctx, calls, config_path, defaults = runtime
+    validations = []
+    monkeypatch.setattr(alloy, "verify_config", lambda **kw: validations.append(kw))
+    first = ctx.run(
+        ctx.on.config_changed(),
+        testing.State(config={"enable-syslog-rfc3164": True}),
+    )
+    calls.clear()
+    enabled = ctx.run(
+        ctx.on.config_changed(),
+        replace(
+            first,
+            config={
+                **first.config,
+                "syslog-rfc3164-cisco-components": "message_counter,second_fractions",
+            },
+        ),
+    )
+    assert calls == ["restart"]
+    assert validations[-1]["experimental"] is True
+    assert "--stability.level=experimental" in defaults.read_text()
+    assert config_path.read_text().count("message_counter = true") == 2
+    calls.clear()
+    changed = ctx.run(
+        ctx.on.config_changed(),
+        replace(
+            enabled,
+            config={
+                **enabled.config,
+                "syslog-rfc3164-cisco-components": "message_counter,hostname,second_fractions",
+            },
+        ),
+    )
+    assert calls == ["reload"]
+    previous = config_path.read_text()
+    calls.clear()
+    invalid = ctx.run(
+        ctx.on.config_changed(),
+        replace(changed, config={**changed.config, "syslog-rfc3164-cisco-components": "invalid"}),
+    )
+    assert invalid.unit_status.name == "blocked"
+    assert config_path.read_text() == previous
+    assert calls == []
+    disabled = ctx.run(
+        ctx.on.config_changed(),
+        replace(invalid, config={"enable-syslog-rfc3164": True}),
+    )
+    assert disabled.unit_status.name == "active"
+    assert calls == ["restart"]
+    assert "--stability.level" not in defaults.read_text()
+    assert "rfc3164_cisco_components" not in config_path.read_text()
+
+
+@pytest.mark.parametrize("debug_initial", [False, True])
+def test_cisco_stability_survives_simultaneous_debug_transitions(runtime, debug_initial):
+    ctx, _, _, defaults = runtime
+    first = ctx.run(
+        ctx.on.config_changed(),
+        testing.State(
+            config={"enable-syslog-rfc3164": True, "alloy-livedebugging": debug_initial}
+        ),
+    )
+    enabled = ctx.run(
+        ctx.on.config_changed(),
+        replace(
+            first,
+            config={
+                **first.config,
+                "alloy-livedebugging": not debug_initial,
+                "syslog-rfc3164-cisco-components": "message_counter,second_fractions",
+            },
+        ),
+    )
+    assert enabled.unit_status.name == "active"
+    assert "--stability.level=experimental" in defaults.read_text()
+    disabled = ctx.run(
+        ctx.on.config_changed(),
+        replace(
+            enabled,
+            config={
+                **enabled.config,
+                "alloy-livedebugging": False,
+                "syslog-rfc3164-cisco-components": "",
+            },
+        ),
+    )
+    assert disabled.unit_status.name == "active"
+    assert "--stability.level" not in defaults.read_text()
+
+
+def test_cisco_runtime_restart_failure_restores_previous_arguments_and_config(
+    runtime, monkeypatch
+):
+    ctx, _, config_path, defaults = runtime
+    first = ctx.run(ctx.on.config_changed(), testing.State(config={"enable-syslog-rfc3164": True}))
+    previous_config, previous_defaults = config_path.read_text(), defaults.read_text()
+    attempts = []
+
+    def reject_experimental_startup():
+        candidate = "--stability.level=experimental" in defaults.read_text()
+        attempts.append(candidate)
+        if candidate:
+            raise RuntimeError("synthetic startup failure")
+
+    monkeypatch.setattr(alloy, "restart", reject_experimental_startup)
+    rejected = ctx.run(
+        ctx.on.config_changed(),
+        replace(
+            first,
+            config={**first.config, "syslog-rfc3164-cisco-components": "message_counter"},
+        ),
+    )
+    assert rejected.unit_status.name == "blocked"
+    assert attempts and attempts.count(True) == attempts.count(False)
+    assert config_path.read_text() == previous_config
+    assert defaults.read_text() == previous_defaults
+    assert applied(rejected)["last_custom_args"] == applied(first)["last_custom_args"]
+
+
+def test_cisco_explicit_stability_conflict_keeps_previous_generation(runtime):
+    ctx, calls, config_path, _ = runtime
+    first = ctx.run(ctx.on.config_changed(), testing.State())
+    previous = config_path.read_text()
+    calls.clear()
+    rejected = ctx.run(
+        ctx.on.config_changed(),
+        replace(
+            first,
+            config={
+                "enable-syslog-rfc3164": True,
+                "syslog-rfc3164-cisco-components": "message_counter",
+                "custom_args": "--stability.level=generally-available",
+            },
+        ),
+    )
+    assert rejected.unit_status.name == "blocked"
+    assert "conflicting stability flag" in rejected.unit_status.message
+    assert config_path.read_text() == previous
+    assert calls == []
+
+
+@pytest.mark.parametrize("override", ["", 'logging { level = "info" }'])
+def test_disabled_or_overridden_cisco_fields_do_not_change_stability(runtime, override):
+    ctx, _, _, defaults = runtime
+    result = ctx.run(
+        ctx.on.config_changed(),
+        testing.State(
+            config={
+                "enable-syslog-rfc3164": bool(override),
+                "syslog-rfc3164-cisco-components": "invalid-ignored-fields",
+                "config-override": override,
+            }
+        ),
+    )
+    assert result.unit_status.name == "active"
+    assert "--stability.level" not in defaults.read_text()
 
 
 def test_rfc3164_changes_reload_and_invalid_port_keeps_last_generation(runtime, monkeypatch):

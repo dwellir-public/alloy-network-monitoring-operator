@@ -75,6 +75,20 @@ def test_rfc3164_without_loki_drops_logs_and_default_port_is_1513():
     assert 'loki.process "remote_syslog"' not in rendered
 
 
+def test_cisco_header_fields_apply_to_both_legacy_transports_only():
+    rendered = _builder(
+        enable_syslog_rfc3164=True,
+        enable_syslog_receivers=True,
+        syslog_rfc3164_cisco_components=("message_counter", "second_fractions"),
+    ).build()
+    modern, legacy = rendered.split('loki.source.syslog "receiver_rfc3164"')
+    assert "rfc3164_cisco_components" not in modern
+    assert legacy.count("rfc3164_cisco_components {") == 2
+    assert legacy.count("message_counter = true") == 2
+    assert legacy.count("second_fractions = true") == 2
+    assert "sequence_number" not in legacy
+
+
 @pytest.mark.parametrize(
     ("port", "rfc5424", "message"),
     [

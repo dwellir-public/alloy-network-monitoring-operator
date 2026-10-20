@@ -21,8 +21,29 @@ def _free_port():
         return listener.getsockname()[1]
 
 
+def _syslog_header(format_name, cisco_fields):
+    if format_name == "rfc5424":
+        return "<27>1 2026-10-20T10:00:00Z modern-switch ios 123 - - "
+    if "hostname" in cisco_fields:
+        return "<142>3527: 000001: cisco-switch: Oct 20 13:38:02.645: "
+    if cisco_fields:
+        # Match the header captured from the affected switch.
+        return "<142>3527: Oct 20 13:38:02.645: "
+    return "<27>Oct 11 22:14:15 legacy-switch ios: "
+
+
 @pytest.mark.parametrize("rfc5424", [False, True])
-def test_native_separate_syslog_receivers_keep_identity_and_parse_cisco(tmp_path, rfc5424):
+@pytest.mark.parametrize(
+    "cisco_fields",
+    [
+        (),
+        ("message_counter", "second_fractions"),
+        ("message_counter", "sequence_number", "hostname", "second_fractions"),
+    ],
+)
+def test_native_separate_syslog_receivers_keep_identity_and_parse_cisco(
+    tmp_path, rfc5424, cisco_fields
+):
     legacy_port, modern_port, http_port = (_free_port() for _ in range(3))
     builder = ConfigBuilder(
         loki_endpoints=["http://127.0.0.1:9/loki/api/v1/push"],
@@ -33,6 +54,7 @@ def test_native_separate_syslog_receivers_keep_identity_and_parse_cisco(tmp_path
         journal_match_expressions=[],
         enable_syslog_rfc3164=True,
         syslog_rfc3164_port=legacy_port,
+        syslog_rfc3164_cisco_components=cisco_fields,
         enable_syslog_receivers=rfc5424,
         syslog_parsers=("cisco_ios",),
         topology_labels={"juju_model": "native", "juju_application": "alloy-test"},
@@ -50,7 +72,10 @@ def test_native_separate_syslog_receivers_keep_identity_and_parse_cisco(tmp_path
     config = tmp_path / "syslog.alloy"
     config.write_text(text)
     binary = str(Path(BINARY).resolve())
-    validated = subprocess.run([binary, "validate", str(config)], capture_output=True, text=True)
+    stability = ["--stability.level=experimental"] if cisco_fields else []
+    validated = subprocess.run(
+        [binary, "validate", str(config), *stability], capture_output=True, text=True
+    )
     assert validated.returncode == 0, validated.stderr
     output = tmp_path / "alloy.log"
     with output.open("w") as log:
@@ -58,6 +83,7 @@ def test_native_separate_syslog_receivers_keep_identity_and_parse_cisco(tmp_path
             [
                 binary,
                 "run",
+                *stability,
                 "--disable-reporting",
                 f"--server.http.listen-addr=127.0.0.1:{http_port}",
                 f"--storage.path={tmp_path / 'data'}",
@@ -78,11 +104,7 @@ def test_native_separate_syslog_receivers_keep_identity_and_parse_cisco(tmp_path
                         "%LINK-3-UPDOWN: Interface GigabitEthernet1/1, changed state to down "
                         f"{format_name}-{protocol}"
                     )
-                    header = (
-                        "<27>Oct 11 22:14:15 legacy-switch ios: "
-                        if format_name == "rfc3164"
-                        else "<27>1 2026-10-20T10:00:00Z modern-switch ios 123 - - "
-                    )
+                    header = _syslog_header(format_name, cisco_fields)
                     payload = (header + body + "\n").encode()
                     if protocol == "tcp":
                         with socket.create_connection(("127.0.0.1", port), timeout=5) as sender:
@@ -98,7 +120,10 @@ def test_native_separate_syslog_receivers_keep_identity_and_parse_cisco(tmp_path
                 time.sleep(0.1)
             logs = output.read_text()
             assert all(line in logs for line in expected), logs
-            assert "legacy-switch" in logs
+            if not cisco_fields:
+                assert "legacy-switch" in logs
+            elif "hostname" in cisco_fields:
+                assert "cisco-switch" in logs
             assert "alloy-test" in logs
         finally:
             process.terminate()

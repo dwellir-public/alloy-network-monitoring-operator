@@ -1,8 +1,10 @@
 """Optional syslog body parsers which preserve original messages and indexed labels."""
 
 import json
+import shlex
 
 PARSERS = ("opnsense_filterlog", "cisco_ios")
+CISCO_HEADER_COMPONENTS = ("message_counter", "sequence_number", "hostname", "second_fractions")
 COMMON = (
     r"^[0-9]+,[^,]*,[^,]*,(?P<event_rule>[0-9]+),"
     r"(?P<event_interface>[^,]+),(?P<event_reason>[^,]+),"
@@ -43,6 +45,40 @@ METADATA = (
 
 class SyslogParsersError(ValueError):
     """Describe invalid parser selection without reflecting its contents."""
+
+
+def parse_cisco_header_components(value: object) -> tuple[str, ...]:
+    """Validate an explicit set of Cisco header fields shared by the legacy listeners."""
+    if not isinstance(value, str) or len(value) > 256:
+        raise SyslogParsersError("syslog-rfc3164-cisco-components must be a comma-separated list")
+    if not value.strip():
+        return ()
+    names = {item.strip() for item in value.split(",")}
+    if not names <= set(CISCO_HEADER_COMPONENTS):
+        raise SyslogParsersError(
+            "syslog-rfc3164-cisco-components supports " + ",".join(CISCO_HEADER_COMPONENTS)
+        )
+    return tuple(name for name in CISCO_HEADER_COMPONENTS if name in names)
+
+
+def with_cisco_stability_args(arguments: str) -> str:
+    """Enable Alloy's required stability flag without overriding an explicit conflict."""
+    tokens = shlex.split(arguments)
+    found = False
+    for index, token in enumerate(tokens):
+        if token.startswith("--stability.level="):
+            level = token.split("=", 1)[1]
+        elif token == "--stability.level":
+            level = tokens[index + 1] if index + 1 < len(tokens) else ""
+        else:
+            continue
+        if level != "experimental":
+            raise SyslogParsersError(
+                "Cisco RFC3164 headers require --stability.level=experimental; "
+                "remove the conflicting stability flag from custom_args"
+            )
+        found = True
+    return arguments if found else (arguments + " --stability.level=experimental").strip()
 
 
 def parse_syslog_parsers(value: object) -> tuple[str, ...]:

@@ -118,6 +118,7 @@ class ConfigBuilder:
         enable_syslog_receivers: bool = False,
         enable_syslog_rfc3164: bool = False,
         syslog_rfc3164_port: int = 1513,
+        syslog_rfc3164_cisco_components: tuple[str, ...] = (),
         syslog_drop_access_logs: bool = False,
         syslog_drop_expressions: list[str] | None = None,
         syslog_rate_limit: int = 0,
@@ -143,6 +144,7 @@ class ConfigBuilder:
         self._enable_syslog_receivers = enable_syslog_receivers
         self._enable_syslog_rfc3164 = enable_syslog_rfc3164
         self._syslog_rfc3164_port = syslog_rfc3164_port
+        self._syslog_rfc3164_cisco_components = syslog_rfc3164_cisco_components
         if enable_syslog_rfc3164:
             if not 1 <= syslog_rfc3164_port <= 65535:
                 raise InvalidSyslogPortError("syslog-rfc3164-port must be between 1 and 65535")
@@ -575,6 +577,21 @@ class ConfigBuilder:
             if self._loki_endpoints
             else "  forward_to = []"
         )
+        if (
+            self._loki_endpoints
+            and syslog_format == "rfc3164"
+            and self._syslog_rfc3164_cisco_components
+        ):
+            forward_to = "  forward_to = [loki.process.syslog_cisco_header.receiver]"
+        cisco_fields = (
+            [
+                "    rfc3164_cisco_components {",
+                *(f"      {name} = true" for name in self._syslog_rfc3164_cisco_components),
+                "    }",
+            ]
+            if syslog_format == "rfc3164" and self._syslog_rfc3164_cisco_components
+            else []
+        )
         return "\n".join(
             [
                 f'loki.source.syslog "{name}" {{',
@@ -583,6 +600,7 @@ class ConfigBuilder:
                 "  listener {",
                 f'    address = ":{port}"',
                 *(['    syslog_format = "rfc3164"'] if syslog_format == "rfc3164" else []),
+                *cisco_fields,
                 "    labels = " + self._render_inline_labels({**labels, "protocol": "tcp"}),
                 "  }",
                 "",
@@ -590,6 +608,7 @@ class ConfigBuilder:
                 f'    address  = ":{port}"',
                 '    protocol = "udp"',
                 *(['    syslog_format = "rfc3164"'] if syslog_format == "rfc3164" else []),
+                *cisco_fields,
                 "    labels = " + self._render_inline_labels({**labels, "protocol": "udp"}),
                 "  }",
                 "",
@@ -601,7 +620,30 @@ class ConfigBuilder:
     def _render_syslog_processor_blocks(self) -> list[str]:
         if not self._loki_endpoints:
             return []
-        return [self._render_remote_syslog_processor(), ""]
+        blocks = [self._render_remote_syslog_processor(), ""]
+        if self._enable_syslog_rfc3164 and self._syslog_rfc3164_cisco_components:
+            blocks.extend([self._render_cisco_header_processor(), ""])
+        return blocks
+
+    @staticmethod
+    def _render_cisco_header_processor() -> str:
+        """Restore Cisco's tag when the RFC3164 decoder separates it from the message."""
+        selector = '{syslog_app_name=~"%[A-Z][A-Z0-9_]+-[0-7]-[A-Z0-9_]+"}'
+        return "\n".join(
+            [
+                'loki.process "syslog_cisco_header" {',
+                "  stage.match {",
+                f"    selector = {json.dumps(selector)}",
+                "    stage.template {",
+                '      source = "cisco_payload"',
+                '      template = "{{ .syslog_app_name }}: {{ .Entry }}"',
+                "    }",
+                '    stage.output { source = "cisco_payload" }',
+                "  }",
+                "  forward_to = [loki.process.remote_syslog.receiver]",
+                "}",
+            ]
+        )
 
     def _render_remote_syslog_processor(self) -> str:
         metadata: list[str] = list(SYSLOG_STRUCTURED_METADATA)
