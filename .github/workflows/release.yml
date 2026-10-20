@@ -28,7 +28,7 @@ jobs:
         run: sudo snap install charmcraft --classic --channel latest/stable
 
       - name: Build charm for ubuntu@22.04:amd64
-        run: sudo charmcraft pack --quiet --destructive-mode --platform ubuntu@22.04:amd64 --quiet
+        run: sudo charmcraft pack --destructive-mode --platform ubuntu@22.04:amd64 --quiet
 
       - name: Upload charm artifact (ubuntu@22.04:amd64)
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6

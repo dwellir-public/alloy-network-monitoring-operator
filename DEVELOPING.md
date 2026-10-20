@@ -48,6 +48,34 @@ the selected model. It creates and removes only owned test applications,
 synthetic secrets and newly allocated empty machines. Follow the
 [live-test instructions](docs/build-test-deploy.md#explicit-live-artifact-test).
 
+## Releasing to Charmhub edge
+
+Run the `Release Charm to Charmhub and GitHub` workflow manually from `main`:
+
+```bash
+gh workflow run release.yml --ref main
+```
+
+The workflow builds separate amd64 artifacts on Ubuntu 22.04 and 24.04. Once
+both builds succeed, it uploads each artifact to `latest/edge` and creates a
+GitHub prerelease with both artifacts and their Charmhub revision numbers.
+The release workflow has no code test gate. Each uploaded artifact receives
+its own Charmhub revision, including the first release.
+
+The repository secret `CHARMHUB_TOKEN` supplies `CHARMCRAFT_AUTH`. Renew it
+using the publisher's Ubuntu One login and a private file outside the checkout:
+
+```bash
+charmcraft login --export /private/path/alloy-nm-charmhub.auth \
+  --charm alloy-nm --channel latest/edge --ttl 31536000 \
+  --permission package-manage-revisions \
+  --permission package-manage-releases --permission package-view
+gh secret set CHARMHUB_TOKEN < /private/path/alloy-nm-charmhub.auth
+```
+
+This token lasts 365 days and permits uploads, release inspection, and releases
+to `latest/edge` for `alloy-nm`. Keep the exported credential private.
+
 ## Dependency ownership and BOMs
 
 `pyproject.toml` and `uv.lock` define Python dependencies. `dependencies/upstreams.json`
