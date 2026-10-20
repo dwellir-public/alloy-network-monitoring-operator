@@ -43,6 +43,8 @@ def device(device_id="123", **overrides):
         "__meta_netbox_name": "router",
         "__meta_netbox_primary_ip4": "127.0.0.2",
         "__meta_netbox_site_slug": "home",
+        "__meta_netbox_role": "Edge Router",
+        "__meta_netbox_role_slug": "edge-router",
         "__meta_netbox_status": "active",
         "__meta_netbox_tag_slugs": "snmp,edge",
         "__meta_netbox_custom_field_snmp_auth": "opnsense",
@@ -213,6 +215,7 @@ def test_dynamic_inventory_identity_and_failure_semantics(server, running_alloy)
         "netbox_id": "123",
         "device": "router",
         "site": "home",
+        "role": "edge-router",
         "collector": "lab",
         **TOPOLOGY,
     }
@@ -232,14 +235,36 @@ def test_dynamic_inventory_identity_and_failure_semantics(server, running_alloy)
     assert renamed[0]["instance"] == "127.0.0.2"
     assert renamed[0]["netbox_id"] == "123"
 
-    server["inventory"] = [
-        device(__meta_netbox_name="router-renamed", __meta_netbox_primary_ip4="127.0.0.3")
-    ]
+    current = device(__meta_netbox_name="router-renamed", __meta_netbox_primary_ip4="127.0.0.3")
+    server["inventory"] = [current]
     selected = wait_for(
         lambda: (result := targets(url)) and result[0]["instance"] == "127.0.0.3" and result
     )
     assert selected[0]["netbox_id"] == "123"
     assert selected[0]["__param_target"] == "127.0.0.3"
+
+    current["labels"]["__meta_netbox_role_slug"] = "distribution-switch"
+    selected = wait_for(
+        lambda: (result := targets(url))
+        and result[0].get("role") == "distribution-switch"
+        and result
+    )
+    assert selected[0]["device"] == "router-renamed"
+    for absent in (False, True):
+        device_name = "router-role-missing" if absent else "router-role-empty"
+        current["labels"]["__meta_netbox_name"] = device_name
+        if absent:
+            current["labels"].pop("__meta_netbox_role_slug")
+            current["labels"].pop("__meta_netbox_role")
+        else:
+            current["labels"]["__meta_netbox_role_slug"] = ""
+        selected = wait_for(
+            lambda: (result := targets(url))
+            and result[0]["device"] == device_name
+            and "role" not in result[0]
+            and result
+        )
+        assert selected[0]["netbox_id"] == "123"
 
     server["status"] = 500
     before = len(server["requests"])

@@ -95,6 +95,7 @@ def start_source(juju: jubilant.Juju, unit: str) -> None:
                     "__meta_netbox_name": "fixture-router",
                     "__meta_netbox_primary_ip4": "127.0.0.2",
                     "__meta_netbox_site_slug": "fixture",
+                    "__meta_netbox_role_slug": "edge-router",
                     "__meta_netbox_status": "active",
                     "__meta_netbox_tag_slugs": "snmp",
                     "__meta_netbox_custom_field_snmp_auth": "fixture",

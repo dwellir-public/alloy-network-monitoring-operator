@@ -35,7 +35,9 @@ All relation definitions and vendored libraries retain their previous contracts.
 Machine-observability inputs preserve each provider's source topology. Related
 and manual metrics use the shared existing writer; logs use existing Loki
 outputs. Device samples use NetBox identity, target-IP instances and collector
-Juju topology as collection provenance. Incoming syslog and local host journal
+Juju topology as collection provenance. The discovered NetBox role slug is kept
+as the optional `role` target/metric label; it is not inferred for logs or other
+scrape jobs. Incoming syslog and local host journal
 logs receive collector topology; provider metrics/logs retain their own source
 topology. External scrape jobs without provider identity receive collector
 context, while partial provider topology is preserved without invented fields.

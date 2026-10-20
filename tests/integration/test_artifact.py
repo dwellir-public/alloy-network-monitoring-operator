@@ -285,6 +285,7 @@ def test_live_relations_labels_secrets_and_refresh(backends, deployment, tmp_pat
         _assert_topology(samples, {**expected, **location_labels})
         assert samples[0]["metric"]["instance"] == "127.0.0.2"
         assert samples[0]["metric"]["netbox_id"] == "1"
+        assert samples[0]["metric"]["role"] == "edge-router"
         evidence["snmp_up"] = samples
         _check_network_feature_controls(deployment, backends, evidence)
         if backends["loki"]:

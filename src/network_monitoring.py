@@ -457,6 +457,7 @@ def render_network_blocks(
         ("id", "netbox_id"),
         ("name", "device"),
         ("site_slug", "site"),
+        ("role_slug", "role"),
         ("primary_ip4", "address"),
         ("custom_field_snmp_auth", "auth"),
     ):
@@ -492,7 +493,7 @@ def render_network_blocks(
             _rule(target="collector", replacement=settings.collector),
             _rule(
                 action="labelkeep",
-                regex="name|address|module|auth|netbox_id|device|site|collector|snmp_config_error",
+                regex="name|address|module|auth|netbox_id|device|site|role|collector|snmp_config_error",
             ),
         ]
     )
@@ -540,7 +541,7 @@ def render_network_blocks(
             *(_rule(target=key, replacement=topology[key]) for key in sorted(topology)),
             _rule(
                 action="labelkeep",
-                regex="__.*|job|instance|netbox_id|device|site|collector|snmp_config_error"
+                regex="__.*|job|instance|netbox_id|device|site|role|collector|snmp_config_error"
                 + ("|" + "|".join(sorted(topology)) if topology else ""),
             ),
             "}",
