@@ -4,6 +4,15 @@ The charm orchestrates configuration, Juju secrets, service control and existing
 integrations. Alloy performs continuous inventory discovery, SNMP collection and
 forwarding. There is no hook-time inventory client or inventory writer.
 
+Syslog uses a shared relabeler and processor for two independently enabled
+components: RFC5424 `receiver` on TCP/UDP 1514 and RFC3164 `receiver_rfc3164`
+on configurable TCP/UDP 1513 by default. Both retain the same source identity,
+location defaults, body parsers, drops, shared rate limit and alert selection.
+The `syslog-receiver` integration continues to advertise RFC5424 only. Invalid
+RFC3164 port ranges or conflicts are rejected before validation/apply, retaining
+the previous generation. Configuration changes reload Alloy; charm refresh
+preserves the running generation until subsequent reconciliation.
+
 ```mermaid
 flowchart LR
     NetBox[NetBox HTTP discovery] --> HTTP[discovery.http]

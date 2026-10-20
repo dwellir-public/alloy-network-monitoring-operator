@@ -302,9 +302,36 @@ juju config alloy-nm \
   syslog-parsers=opnsense_filterlog,cisco_ios
 ```
 
-Point the devices' remote syslog settings at the Alloy machine. The receivers
-accept RFC5424 syslog; configure the sender accordingly. The `syslog-receiver`
-relation remains available for senders using the existing interface.
+Point the devices' remote syslog settings at the Alloy machine. Port 1514 accepts
+RFC5424 syslog. The `syslog-receiver` integration continues to advertise this port.
+
+For legacy devices such as Cisco switches sending **RFC3164** (BSD syslog), enable
+the separate receiver on TCP and UDP port **1513**:
+
+```bash
+juju config alloy-nm enable-syslog-rfc3164=true syslog-parsers=cisco_ios
+```
+
+Configure the switch's syslog destination as the Alloy machine's IP and port 1513.
+You can enable either receiver independently, or run both at once. To choose
+another RFC3164 port, set `syslog-rfc3164-port=2513`, for example. Ports must be
+between 1 and 65535 and must not conflict with the enabled RFC5424 or Alloy HTTP
+listener. Invalid settings leave the working configuration in place and report
+a blocked Juju status.
+
+Both formats use the same Loki destination, Juju topology/location labels,
+source hostname/IP labels, optional parsers, drop rules and rate limit. The rate
+limit is shared across both receivers. Connect `send-loki-logs` before forwarding
+device logs; without a Loki destination, incoming logs are discarded. Allow the
+selected TCP/UDP port through any network firewall. RFC3164 connection details
+are configured directly on the sender; the existing integration advertises only
+RFC5424. Both formats use reception time for the Loki timestamp.
+
+The new listener accepts standard RFC3164. Cisco IOS may add non-standard header
+fields such as sequence counters or fractional timestamps; configure the sender
+to produce compatible headers. Alloy's experimental Cisco header extensions
+are separate from the `cisco_ios` body parser and are not enabled by this option.
+See the [pinned Alloy 1.20.1 syslog reference](https://github.com/grafana/alloy/blob/v1.20.1/docs/sources/reference/components/loki/loki.source.syslog.md).
 
 Parser selection is configurable:
 
@@ -339,7 +366,8 @@ available as `syslog_hostname` and `source_ip`; the charm does not infer a NetBo
 `device` label for logs.
 
 Set `syslog-parsers=""` to disable body parsing while continuing to receive logs.
-Set `enable-syslogreceivers=false` to disable reception. Existing drop expressions
+Set `enable-syslogreceivers=false` to disable RFC5424 reception, and
+`enable-syslog-rfc3164=false` to disable RFC3164. Existing drop expressions
 and rate limits apply after parsing and affect which events reach Loki and its
 alerts.
 
@@ -613,6 +641,8 @@ below mean the option is unset. YAML examples above are passed as string values.
 | `journal-kernel` | Boolean | `false` | Include host kernel messages in the broader journal capture. |
 | `journal-match-expressions` | String | Empty | Newline-separated raw journal matches, for example `SYSLOG_IDENTIFIER=lxd`; passed through to journald. |
 | `enable-syslogreceivers` | Boolean | `false` | Receive RFC5424 syslog on TCP/UDP port 1514. |
+| `enable-syslog-rfc3164` | Boolean | `false` | Enable a separate RFC3164 TCP/UDP receiver, independently of RFC5424. |
+| `syslog-rfc3164-port` | Integer | `1513` | RFC3164 port (1–65535); must differ from enabled RFC5424/Alloy HTTP listeners. |
 | `syslog-parsers` | String | Empty | Optional comma-separated `opnsense_filterlog,cisco_ios`; empty disables parsing. |
 | `syslog-drop-access-logs` | Boolean | `false` | Drop common HTTP request-style remote syslog lines. |
 | `syslog-drop-expressions` | String | Empty | Newline-separated regexes for dropping remote syslog lines. |

@@ -45,6 +45,7 @@ from config_builder import (
     DEFAULT_PACKAGE_CONFIG_BACKUP_PATH,
     ConfigBuilder,
     InvalidLogLevelError,
+    InvalidSyslogPortError,
     LogSourceGroup,
     MetricsScrapeJob,
     ScrapeTarget,
@@ -516,7 +517,7 @@ class AlloyCharm(ops.CharmBase):
             network_log_alert_groups(
                 owner, topology_labels=topology, settings=self._network_features
             )
-            if self.config.get("enable-syslogreceivers")
+            if self._any_syslog_receiver_enabled()
             else []
         )
         related_state = (
@@ -583,7 +584,7 @@ class AlloyCharm(ops.CharmBase):
         applied = dict(self._stored.network_feature_config)
         if (
             not applied
-            or not applied.get("enable-syslogreceivers")
+            or not (applied.get("enable-syslogreceivers") or applied.get("enable-syslog-rfc3164"))
             or applied.get("override-active")
         ):
             return []
@@ -603,6 +604,7 @@ class AlloyCharm(ops.CharmBase):
             "syslog-parsers",
             "network-monitoring-enabled",
             "enable-syslogreceivers",
+            "enable-syslog-rfc3164",
         )
         defaults = {
             "network-alerts-enabled": True,
@@ -612,6 +614,7 @@ class AlloyCharm(ops.CharmBase):
             "syslog-parsers": "",
             "network-monitoring-enabled": False,
             "enable-syslogreceivers": False,
+            "enable-syslog-rfc3164": False,
         }
         self._stored.network_feature_config = {
             **{name: self.config.get(name, defaults[name]) for name in names},
@@ -1180,7 +1183,7 @@ class AlloyCharm(ops.CharmBase):
             self._stop_network_on_access_failure()
             message = (
                 str(exc)
-                if isinstance(exc, InvalidLogLevelError)
+                if isinstance(exc, (InvalidLogLevelError, InvalidSyslogPortError))
                 else "Invalid Alloy runtime arguments"
             )
             return ops.BlockedStatus(message)
@@ -1384,6 +1387,8 @@ class AlloyCharm(ops.CharmBase):
             journal_match_expressions=self._journal_match_expressions(),
             live_debugging=self._live_debugging_enabled(),
             enable_syslog_receivers=self._syslog_receivers_enabled(),
+            enable_syslog_rfc3164=bool(self.config.get("enable-syslog-rfc3164", False)),
+            syslog_rfc3164_port=int(self.config.get("syslog-rfc3164-port", 1513)),
             syslog_drop_access_logs=self._syslog_drop_access_logs(),
             syslog_drop_expressions=self._syslog_drop_expressions(),
             syslog_rate_limit=self._syslog_rate_limit(),
@@ -1493,8 +1498,14 @@ class AlloyCharm(ops.CharmBase):
         return bool(self.config.get("alloy-livedebugging", False))
 
     def _syslog_receivers_enabled(self) -> bool:
-        """Return True when syslog receiver listeners should be enabled."""
+        """Return True when the RFC5424 listeners advertised by the integration are enabled."""
         return bool(self.config.get("enable-syslogreceivers", False))
+
+    def _any_syslog_receiver_enabled(self) -> bool:
+        """Return whether either syslog format is enabled for managed log rules."""
+        return self._syslog_receivers_enabled() or bool(
+            self.config.get("enable-syslog-rfc3164", False)
+        )
 
     def _journal_kernel_enabled(self) -> bool:
         """Return True when host kernel journal messages should be collected."""

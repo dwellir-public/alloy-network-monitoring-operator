@@ -46,6 +46,8 @@ receive/transmit utilisation, zero-speed exclusion, packet-rate floors,
 missing capabilities, power/sensor states, uptime resets versus TimeTicks wrap,
 enhanced-memory preference, and an interface alert's pending/firing/recovery.
 It skips explicitly when `PROMTOOL_BINARY` is absent; CI supplies both binaries.
+Native receiver tests exercise generated RFC3164 TCP/UDP reception both alone
+and alongside RFC5424, including Cisco body parsing and source identity.
 Alloy parser tests preserve
 original OPNsense IPv4/IPv6/ICMP and Cisco messages and check extracted fields.
 
@@ -113,6 +115,13 @@ Loki provider/query inputs must be supplied together; omitted Loki inputs leave
 log ingestion unverified. The backend test skips if its required Mimir inputs
 are absent. Supplying a previous artifact establishes an old-to-new refresh;
 without it, refresh uses the current artifact and cannot prove that upgrade path.
+
+The independent RFC3164 acceptance test needs only the Loki provider/query
+inputs, the common artifact/model/base inputs and `TEST_MODEL_UUID` matching
+`juju show-model "$TEST_MODEL" --format=json`. Select it with
+`uv run pytest tests/integration/test_artifact.py -k independent_rfc3164_receiver`.
+It checks TCP/UDP delivery on 1513, custom ports, simultaneous RFC5424, topology
+and parsed metadata in Loki, invalid-port retention and receiver disablement.
 
 The test creates uniquely named applications, fake Juju secrets and loopback
 inventory/metrics sources. A colocated fixture publishes real provider topology

@@ -39,6 +39,10 @@ class InvalidLogLevelError(ValueError):
     """Reject unsupported logging levels without echoing configuration."""
 
 
+class InvalidSyslogPortError(ValueError):
+    """Reject unusable RFC3164 listener ports before applying configuration."""
+
+
 def normalize_log_level(value: str) -> str:
     """Preserve documented aliases while using Alloy's supported log levels."""
     levels = {
@@ -112,6 +116,8 @@ class ConfigBuilder:
         journal_match_expressions: list[str],
         live_debugging: bool = False,
         enable_syslog_receivers: bool = False,
+        enable_syslog_rfc3164: bool = False,
+        syslog_rfc3164_port: int = 1513,
         syslog_drop_access_logs: bool = False,
         syslog_drop_expressions: list[str] | None = None,
         syslog_rate_limit: int = 0,
@@ -135,6 +141,19 @@ class ConfigBuilder:
         self._journal_match_expressions = journal_match_expressions
         self._live_debugging = live_debugging
         self._enable_syslog_receivers = enable_syslog_receivers
+        self._enable_syslog_rfc3164 = enable_syslog_rfc3164
+        self._syslog_rfc3164_port = syslog_rfc3164_port
+        if enable_syslog_rfc3164:
+            if not 1 <= syslog_rfc3164_port <= 65535:
+                raise InvalidSyslogPortError("syslog-rfc3164-port must be between 1 and 65535")
+            if enable_syslog_receivers and syslog_rfc3164_port == 1514:
+                raise InvalidSyslogPortError(
+                    "syslog-rfc3164-port conflicts with RFC5424 on port 1514"
+                )
+            if str(syslog_rfc3164_port) == self_metrics_address.rsplit(":", 1)[-1]:
+                raise InvalidSyslogPortError(
+                    "syslog-rfc3164-port conflicts with the Alloy HTTP listener"
+                )
         self._syslog_drop_access_logs = syslog_drop_access_logs
         self._syslog_drop_expressions = syslog_drop_expressions or []
         self._syslog_rate_limit = syslog_rate_limit
@@ -214,18 +233,36 @@ class ConfigBuilder:
                 blocks.extend([block, ""])
         for block in self._render_host_journal_sources():
             blocks.extend([block, ""])
+        blocks.extend(self._render_syslog_blocks())
+        if self._has_log_pipeline():
+            blocks.append(self._render_loki_writer())
+        return blocks
+
+    def _render_syslog_blocks(self) -> list[str]:
+        """Render shared processing once and each independently enabled receiver."""
+        if not (self._enable_syslog_receivers or self._enable_syslog_rfc3164):
+            return []
+        blocks: list[str] = []
+        blocks.extend(
+            [
+                self._render_syslog_relabel(),
+                "",
+                *self._render_syslog_processor_blocks(),
+            ]
+        )
         if self._enable_syslog_receivers:
+            blocks.extend([self._render_syslog_source(), ""])
+        if self._enable_syslog_rfc3164:
             blocks.extend(
                 [
-                    self._render_syslog_relabel(),
-                    "",
-                    *self._render_syslog_processor_blocks(),
-                    self._render_syslog_source(),
+                    self._render_syslog_source(
+                        name="receiver_rfc3164",
+                        port=self._syslog_rfc3164_port,
+                        syslog_format="rfc3164",
+                    ),
                     "",
                 ]
             )
-        if self._has_log_pipeline():
-            blocks.append(self._render_loki_writer())
         return blocks
 
     def _render_logging(self) -> str:
@@ -519,7 +556,10 @@ class ConfigBuilder:
             ]
         )
 
-    def _render_syslog_source(self) -> str:
+    def _render_syslog_source(
+        self, *, name: str = "receiver", port: int = 1514, syslog_format: str = "rfc5424"
+    ) -> str:
+        """Render independent TCP/UDP listeners sharing syslog processing and identity."""
         receiver_hostname = self._receiver_hostname or "unknown"
         receiver_ip = self._receiver_ip or "unknown"
         labels = {
@@ -537,17 +577,19 @@ class ConfigBuilder:
         )
         return "\n".join(
             [
-                'loki.source.syslog "receiver" {',
+                f'loki.source.syslog "{name}" {{',
                 "  relabel_rules = loki.relabel.syslog.rules",
                 "",
                 "  listener {",
-                '    address = ":1514"',
+                f'    address = ":{port}"',
+                *(['    syslog_format = "rfc3164"'] if syslog_format == "rfc3164" else []),
                 "    labels = " + self._render_inline_labels({**labels, "protocol": "tcp"}),
                 "  }",
                 "",
                 "  listener {",
-                '    address  = ":1514"',
+                f'    address  = ":{port}"',
                 '    protocol = "udp"',
+                *(['    syslog_format = "rfc3164"'] if syslog_format == "rfc3164" else []),
                 "    labels = " + self._render_inline_labels({**labels, "protocol": "udp"}),
                 "  }",
                 "",
@@ -684,6 +726,7 @@ class ConfigBuilder:
             self._effective_log_source_groups()
             or self._has_host_journal_source()
             or self._enable_syslog_receivers
+            or self._enable_syslog_rfc3164
         )
 
     def _host_journal_matches(self) -> list[str]:

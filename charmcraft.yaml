@@ -170,11 +170,27 @@ config:
       type: boolean
     enable-syslogreceivers:
       description: |
-        Enable Alloy syslog listeners for remote syslog ingestion. When true,
+        Enable Alloy RFC5424 syslog listeners for remote syslog ingestion. When true,
         Alloy listens on both TCP and UDP port 1514 and forwards incoming logs
         directly to Loki with collector Juju topology and syslog origin labels.
       default: false
       type: boolean
+    enable-syslog-rfc3164:
+      description: |
+        Enable separate RFC3164 (BSD syslog) TCP and UDP listeners for legacy
+        devices, including Cisco switches. Independent of enable-syslogreceivers;
+        uses the same Loki destination, labels, parsers, drops and rate limit.
+        Connection details are configured on the sender, not advertised through
+        the existing RFC5424 syslog-receiver integration.
+      default: false
+      type: boolean
+    syslog-rfc3164-port:
+      description: |
+        TCP and UDP listen port for the optional RFC3164 receiver (1-65535).
+        Must differ from port 1514 when the RFC5424 receiver is also enabled,
+        and from the Alloy HTTP listener port. Ignored when RFC3164 is disabled.
+      default: 1513
+      type: int
     syslog-parsers:
       description: |
         Optional comma-separated parsing profiles: opnsense_filterlog,cisco_ios.
@@ -186,15 +202,13 @@ config:
       description: |
         Drop common request-style remote syslog lines before forwarding them to
         Loki. This is intended as a second guardrail for high-volume senders
-        such as HAProxy and only affects remote syslog received through
-        `syslog-receiver`.
+        such as HAProxy and affects both RFC5424 and RFC3164 receivers.
       default: false
       type: boolean
     syslog-drop-expressions:
       description: |
         Newline-separated regular expressions to drop from remote syslog before
-        forwarding to Loki. These expressions apply only to logs received
-        through `syslog-receiver`.
+        forwarding to Loki. These expressions apply to both syslog receivers.
       default: ""
       type: string
     syslog-rate-limit:
