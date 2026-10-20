@@ -1,0 +1,12 @@
+# manual-metrics-jobs.yaml
+- name: external-node-exporter
+  targets:
+    - "10.99.100.254:9100"
+    - "10.99.100.253:9100"
+  metrics_path: /metrics
+  scheme: http
+  scrape_interval: 30s
+  scrape_timeout: 10s
+  insecure_skip_verify: false
+  labels:
+    role: router

@@ -3,7 +3,9 @@
 
 import json
 
-from config_builder import ConfigBuilder, MetricsScrapeJob, ScrapeTarget
+import pytest
+
+from config_builder import ConfigBuilder, InvalidSyslogPortError, MetricsScrapeJob, ScrapeTarget
 from outbound_endpoints import OutboundEndpoint
 
 TOPOLOGY = {
@@ -35,6 +37,65 @@ def _builder(**kwargs) -> ConfigBuilder:
     }
     defaults.update(kwargs)
     return ConfigBuilder(**defaults)
+
+
+@pytest.mark.parametrize("rfc5424", [False, True])
+@pytest.mark.parametrize("port", [1513, 2513])
+def test_rfc3164_has_independent_tcp_udp_listeners_and_shared_processing(rfc5424, port):
+    rendered = _builder(
+        enable_syslog_rfc3164=True,
+        syslog_rfc3164_port=port,
+        enable_syslog_receivers=rfc5424,
+        loki_endpoints=["http://loki:3100/loki/api/v1/push"],
+        syslog_parsers=("cisco_ios",),
+        syslog_drop_expressions=["drop-this"],
+        syslog_rate_limit=100,
+    ).build()
+    legacy = rendered.split('loki.source.syslog "receiver_rfc3164" {')[1]
+    assert f'address = ":{port}"' in legacy
+    assert f'address  = ":{port}"' in legacy
+    assert legacy.count('syslog_format = "rfc3164"') == 2
+    assert 'protocol = "udp"' in legacy
+    assert "forward_to = [loki.process.remote_syslog.receiver]" in legacy
+    assert 'juju_model = "test-model"' in legacy
+    assert 'log_source = "remote_syslog"' in legacy
+    assert rendered.count('loki.process "remote_syslog" {') == 1
+    assert rendered.count('loki.relabel "syslog" {') == 1
+    assert 'expression = "drop-this"' in rendered
+    assert "rate = 100" in rendered
+    assert 'source = "event_vendor"' in rendered
+    assert ('loki.source.syslog "receiver" {' in rendered) == rfc5424
+
+
+def test_rfc3164_without_loki_drops_logs_and_default_port_is_1513():
+    rendered = _builder(enable_syslog_rfc3164=True).build()
+    source = rendered.split('loki.source.syslog "receiver_rfc3164" {')[1]
+    assert 'address = ":1513"' in source
+    assert "forward_to = []" in source
+    assert 'loki.process "remote_syslog"' not in rendered
+
+
+@pytest.mark.parametrize(
+    ("port", "rfc5424", "message"),
+    [
+        (0, False, "between 1 and 65535"),
+        (-1, False, "between 1 and 65535"),
+        (65536, False, "between 1 and 65535"),
+        (1514, True, "conflicts with RFC5424"),
+        (6987, False, "conflicts with the Alloy HTTP"),
+    ],
+)
+def test_rfc3164_invalid_ports_are_rejected_before_rendering(port, rfc5424, message):
+    with pytest.raises(InvalidSyslogPortError, match=message):
+        _builder(
+            enable_syslog_rfc3164=True,
+            enable_syslog_receivers=rfc5424,
+            syslog_rfc3164_port=port,
+        )
+
+
+def test_disabled_rfc3164_ignores_its_port_and_does_not_change_existing_config():
+    assert _builder(syslog_rfc3164_port=0).build() == _builder().build()
 
 
 def test_local_metrics_drop_without_remote_write():

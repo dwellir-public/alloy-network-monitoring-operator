@@ -80,6 +80,71 @@ def rule_payload(state, endpoint):
     return json.loads(relation.local_app_data["alert_rules"])["groups"]
 
 
+def test_rfc3164_changes_reload_and_invalid_port_keeps_last_generation(runtime, monkeypatch):
+    ctx, calls, config_path, _ = runtime
+    monkeypatch.setattr(AlloyCharm, "_loki_endpoint_urls", lambda _: ["http://loki/push"])
+    first = ctx.run(
+        ctx.on.config_changed(),
+        testing.State(config={"enable-syslog-rfc3164": True, "enable-syslogreceivers": True}),
+    )
+    previous = config_path.read_text()
+    assert 'loki.source.syslog "receiver_rfc3164"' in previous
+    calls.clear()
+    rejected = ctx.run(
+        ctx.on.config_changed(),
+        replace(first, config={**first.config, "syslog-rfc3164-port": 1514}),
+    )
+    assert rejected.unit_status.name == "blocked"
+    assert "conflicts with RFC5424" in rejected.unit_status.message
+    assert config_path.read_text() == previous
+    assert applied(rejected)["last_good_config"] == previous
+    assert calls == []
+    recovered = ctx.run(
+        ctx.on.config_changed(),
+        replace(rejected, config={**first.config, "syslog-rfc3164-port": 2513}),
+    )
+    assert recovered.unit_status.name == "active"
+    assert 'address = ":2513"' in config_path.read_text()
+    assert calls == ["reload"]
+    calls.clear()
+    disabled = ctx.run(
+        ctx.on.config_changed(),
+        replace(recovered, config={"enable-syslogreceivers": True}),
+    )
+    assert disabled.unit_status.name == "active"
+    assert 'loki.source.syslog "receiver_rfc3164"' not in config_path.read_text()
+    assert 'loki.source.syslog "receiver"' in config_path.read_text()
+    assert calls == ["reload"]
+
+
+def test_rfc3164_alone_ships_log_rules_without_advertising_rfc5424(runtime, monkeypatch):
+    ctx, _, config_path, _ = runtime
+    monkeypatch.setattr(AlloyCharm, "_loki_endpoint_urls", lambda _: ["http://loki/push"])
+    receiver = testing.Relation("syslog-receiver", remote_app_name="sender")
+    loki = testing.Relation("send-loki-logs", remote_app_name="loki")
+    state = testing.State(
+        leader=True,
+        config={
+            "enable-syslog-rfc3164": True,
+            "syslog-parsers": "cisco_ios",
+            "network-log-alerts-enabled": True,
+        },
+        relations=[receiver, loki],
+    )
+    result = ctx.run(ctx.on.config_changed(), state)
+    assert rule_payload(result, "send-loki-logs")
+    assert applied(result)["network_feature_config"]["enable-syslog-rfc3164"] is True
+    assert 'loki.source.syslog "receiver"' not in config_path.read_text()
+    payload = result.get_relation(receiver.id).local_app_data
+    assert payload["ready"] == "false"
+    assert "port" not in payload
+    disabled = ctx.run(
+        ctx.on.config_changed(),
+        replace(result, config={**result.config, "enable-syslog-rfc3164": False}),
+    )
+    assert rule_payload(disabled, "send-loki-logs") == []
+
+
 def test_optional_owned_metric_and_log_rules_withdraw_without_changing_collection(
     runtime, monkeypatch
 ):

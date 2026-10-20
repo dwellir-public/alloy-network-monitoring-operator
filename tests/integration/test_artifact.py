@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import uuid
+import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,6 +18,7 @@ from live_helpers import (
     indexed_log_labels,
     network_target_modules,
     query,
+    remote_python,
     rotate_source,
     set_inventory_modules,
     snapshot,
@@ -58,6 +60,12 @@ def deployment(artifact):
     base = os.environ.get("TEST_BASE", "ubuntu@24.04")
     assert base in {"ubuntu@22.04", "ubuntu@24.04"}
     juju = jubilant.Juju(model=model, wait_timeout=1200)
+    identity = json.loads(juju.cli("show-model", model, "--format=json", include_model=False))
+    assert len(identity) == 1
+    actual_uuid = next(iter(identity.values()))["model-uuid"]
+    expected_uuid = os.environ.get("TEST_MODEL_UUID", "")
+    if expected_uuid:
+        assert actual_uuid == expected_uuid, "TEST_MODEL_UUID does not match the selected model"
     original = juju.status()
     original_machines = set(original.machines)
     app = "alloy-network-test-" + uuid.uuid4().hex[:8]
@@ -104,6 +112,96 @@ def test_artifact_runtime_and_network_destination_gate(deployment):
     assert 'discovery.http "network_netbox"' not in config
     juju.config(app, {"network-monitoring-enabled": False})
     _wait_status(juju, app, "active")
+
+
+@pytest.fixture
+def syslog_backend():
+    """Require explicit lab identity and Loki inputs before allocating a test unit."""
+    settings = {
+        "provider": os.environ.get("TEST_LOKI_PROVIDER", ""),
+        "query_url": os.environ.get("TEST_LOKI_QUERY_URL", ""),
+    }
+    if not all(settings.values()) or not os.environ.get("TEST_MODEL_UUID"):
+        pytest.skip("Set TEST_MODEL_UUID, TEST_LOKI_PROVIDER and TEST_LOKI_QUERY_URL")
+    return settings
+
+
+def _emit_legacy_syslog(juju, unit, port, marker):
+    """Send standard BSD syslog over TCP and UDP on the owned test machine only."""
+    remote_python(
+        juju,
+        unit,
+        "import socket\n"
+        f"port={port!r}\nmarker={marker!r}\n"
+        "for protocol in ('tcp','udp'):\n"
+        " body='%LINK-3-UPDOWN: Interface GigabitEthernet1/1, changed state to down '\n"
+        " header='<27>Oct 11 22:14:15 legacy-switch ios: '\n"
+        " payload=(header+body+marker+'-'+protocol+'\\n').encode()\n"
+        " if protocol=='tcp':\n"
+        "  with socket.create_connection(('127.0.0.1',port),timeout=5) as s: s.sendall(payload)\n"
+        " else:\n"
+        "  with socket.socket(socket.AF_INET,socket.SOCK_DGRAM) as s:\n"
+        "   s.sendto(payload,('127.0.0.1',port))\n",
+    )
+
+
+def test_artifact_independent_rfc3164_receiver(syslog_backend, deployment):
+    """Ship both legacy transports to Loki, retaining the generation on invalid config."""
+    juju, app = deployment.juju, deployment.app
+    _wait_status(juju, app, "active")
+    unit = next(iter(juju.status().apps[app].units))
+    with zipfile.ZipFile(deployment.artifact) as archive:
+        for name in ("charm.py", "config_builder.py"):
+            expected = hashlib.sha256(archive.read("src/" + name)).hexdigest()
+            remote = f"/var/lib/juju/agents/unit-{unit.replace('/', '-')}/charm/src/{name}"
+            actual = juju.cli("ssh", unit, "--", "sudo", "sha256sum", remote).split()[0]
+            assert actual == expected
+    juju.integrate(f"{app}:send-loki-logs", syslog_backend["provider"])
+    juju.config(
+        app,
+        {
+            "enable-syslog-rfc3164": True,
+            "syslog-parsers": "cisco_ios",
+            "netbox-site": "fixture-site",
+            "netbox-region": "fixture-region",
+        },
+    )
+    _wait_status(juju, app, "active")
+    selector = f'{{juju_application="{app}",log_source="remote_syslog"}}'
+    marker = "rfc3164-" + uuid.uuid4().hex
+
+    def received(expected):
+        results = query(syslog_backend["query_url"], selector + f' |= "{marker}"', logs=True)
+        lines = [value[1] for result in results for value in result["values"]]
+        return results if all(any(item in line for line in lines) for item in expected) else []
+
+    _emit_legacy_syslog(juju, unit, 1513, marker)
+    samples = wait_for(lambda: received([marker + "-tcp", marker + "-udp"]))
+    for sample in samples:
+        labels = sample["stream"]
+        assert labels["juju_model_uuid"] == os.environ["TEST_MODEL_UUID"]
+        assert labels["juju_unit"] == unit
+        assert labels["syslog_hostname"] == "legacy-switch"
+        assert labels["site"] == "fixture-site"
+        assert labels["region"] == "fixture-region"
+        assert labels["event_vendor"] == "cisco"
+        assert labels["event_type"] == "interface_state"
+    juju.config(app, {"enable-syslogreceivers": True, "syslog-rfc3164-port": 2513})
+    _wait_status(juju, app, "active")
+    _emit_legacy_syslog(juju, unit, 2513, marker + "-custom")
+    emit_logs(juju, unit, marker + "-modern")
+    wait_for(lambda: received([marker + "-custom-tcp", marker + "-modern"]))
+    before = juju.cli("ssh", unit, "--", "sudo", "sha256sum", "/etc/alloy/config.alloy")
+    juju.config(app, {"syslog-rfc3164-port": 1514})
+    _wait_status(juju, app, "blocked")
+    after = juju.cli("ssh", unit, "--", "sudo", "sha256sum", "/etc/alloy/config.alloy")
+    assert after == before
+    assert "conflicts with RFC5424" in juju.status().apps[app].units[unit].workload_status.message
+    juju.config(app, {"enable-syslog-rfc3164": False})
+    _wait_status(juju, app, "active")
+    config = juju.cli("ssh", unit, "--", "sudo", "cat", "/etc/alloy/config.alloy")
+    assert 'loki.source.syslog "receiver_rfc3164"' not in config
+    assert 'loki.source.syslog "receiver"' in config
 
 
 @pytest.fixture
