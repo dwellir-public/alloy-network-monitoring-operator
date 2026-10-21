@@ -126,8 +126,13 @@ def syslog_backend():
     return settings
 
 
-def _emit_legacy_syslog(juju, unit, port, marker):
-    """Send standard BSD syslog over TCP and UDP on the owned test machine only."""
+def _emit_legacy_syslog(juju, unit, port, marker, *, cisco_headers=False):
+    """Send BSD or captured Cisco headers on the owned test machine only."""
+    header = (
+        "<142>3527: Oct 20 13:38:02.645: "
+        if cisco_headers
+        else "<27>Oct 11 22:14:15 legacy-switch ios: "
+    )
     remote_python(
         juju,
         unit,
@@ -135,7 +140,7 @@ def _emit_legacy_syslog(juju, unit, port, marker):
         f"port={port!r}\nmarker={marker!r}\n"
         "for protocol in ('tcp','udp'):\n"
         " body='%LINK-3-UPDOWN: Interface GigabitEthernet1/1, changed state to down '\n"
-        " header='<27>Oct 11 22:14:15 legacy-switch ios: '\n"
+        f" header={header!r}\n"
         " payload=(header+body+marker+'-'+protocol+'\\n').encode()\n"
         " if protocol=='tcp':\n"
         "  with socket.create_connection(('127.0.0.1',port),timeout=5) as s: s.sendall(payload)\n"
@@ -145,7 +150,8 @@ def _emit_legacy_syslog(juju, unit, port, marker):
     )
 
 
-def test_artifact_independent_rfc3164_receiver(syslog_backend, deployment):
+@pytest.mark.parametrize("cisco_headers", [False, True])
+def test_artifact_independent_rfc3164_receiver(syslog_backend, deployment, cisco_headers):
     """Ship both legacy transports to Loki, retaining the generation on invalid config."""
     juju, app = deployment.juju, deployment.app
     _wait_status(juju, app, "active")
@@ -161,6 +167,9 @@ def test_artifact_independent_rfc3164_receiver(syslog_backend, deployment):
         app,
         {
             "enable-syslog-rfc3164": True,
+            "syslog-rfc3164-cisco-components": (
+                "message_counter,second_fractions" if cisco_headers else ""
+            ),
             "syslog-parsers": "cisco_ios",
             "netbox-site": "fixture-site",
             "netbox-region": "fixture-region",
@@ -175,20 +184,22 @@ def test_artifact_independent_rfc3164_receiver(syslog_backend, deployment):
         lines = [value[1] for result in results for value in result["values"]]
         return results if all(any(item in line for line in lines) for item in expected) else []
 
-    _emit_legacy_syslog(juju, unit, 1513, marker)
+    _emit_legacy_syslog(juju, unit, 1513, marker, cisco_headers=cisco_headers)
     samples = wait_for(lambda: received([marker + "-tcp", marker + "-udp"]))
     for sample in samples:
         labels = sample["stream"]
         assert labels["juju_model_uuid"] == os.environ["TEST_MODEL_UUID"]
         assert labels["juju_unit"] == unit
-        assert labels["syslog_hostname"] == "legacy-switch"
+        if not cisco_headers:
+            assert labels["syslog_hostname"] == "legacy-switch"
+        assert labels["source_ip"] == "127.0.0.1"
         assert labels["site"] == "fixture-site"
         assert labels["region"] == "fixture-region"
         assert labels["event_vendor"] == "cisco"
         assert labels["event_type"] == "interface_state"
     juju.config(app, {"enable-syslogreceivers": True, "syslog-rfc3164-port": 2513})
     _wait_status(juju, app, "active")
-    _emit_legacy_syslog(juju, unit, 2513, marker + "-custom")
+    _emit_legacy_syslog(juju, unit, 2513, marker + "-custom", cisco_headers=cisco_headers)
     emit_logs(juju, unit, marker + "-modern")
     wait_for(lambda: received([marker + "-custom-tcp", marker + "-modern"]))
     before = juju.cli("ssh", unit, "--", "sudo", "sha256sum", "/etc/alloy/config.alloy")

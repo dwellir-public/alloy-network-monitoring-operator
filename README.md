@@ -327,10 +327,46 @@ selected TCP/UDP port through any network firewall. RFC3164 connection details
 are configured directly on the sender; the existing integration advertises only
 RFC5424. Both formats use reception time for the Loki timestamp.
 
-The new listener accepts standard RFC3164. Cisco IOS may add non-standard header
-fields such as sequence counters or fractional timestamps; configure the sender
-to produce compatible headers. Alloy's experimental Cisco header extensions
-are separate from the `cisco_ios` body parser and are not enabled by this option.
+The default listener accepts standard RFC3164. Cisco IOS often adds a message
+counter and milliseconds, for example:
+
+```text
+<142>3527: Oct 20 13:38:02.645: %LINK-3-UPDOWN: Interface ...
+```
+
+For that header, select the two fields the switch actually sends:
+
+```bash
+juju config alloy-nm \
+  enable-syslog-rfc3164=true \
+  syslog-rfc3164-cisco-components=message_counter,second_fractions \
+  syslog-parsers=cisco_ios
+```
+
+`syslog-rfc3164-cisco-components` controls **header decoding**. The separate
+`syslog-parsers=cisco_ios` setting parses the message body after header decoding.
+Enabling the body parser alone cannot fix rejected headers.
+
+| Header field | Select when the sender includes |
+| --- | --- |
+| `message_counter` | A remote logging counter, such as `3527:` immediately after `<142>`. |
+| `sequence_number` | An additional sequence number enabled by `service sequence-numbers`. |
+| `hostname` | A hostname before the timestamp, configured with `logging origin-id hostname`. |
+| `second_fractions` | Fractional seconds, such as `13:38:02.645`. |
+
+Select only fields present in the wire format. All devices sharing the RFC3164
+port must use matching headers; selecting every field can reject messages that
+omit one. If the sender omits its hostname, identify it by `source_ip`; the charm
+does not invent a hostname. The Cisco tag is preserved in the message body so
+existing parsing, filters and alerts continue to work.
+
+This opts into Alloy's **experimental Cisco header parser**. The charm adds
+`--stability.level=experimental` to managed runtime arguments while Cisco header
+fields are selected and RFC3164 is enabled. Adding or removing that flag restarts
+Alloy; changing fields while the flag remains enabled uses a reload. An explicit
+conflicting stability flag in `custom_args` blocks the change with an explanation.
+Empty `syslog-rfc3164-cisco-components` restores standard RFC3164. A complete
+`config-override` manages its own header options and stability flags.
 See the [pinned Alloy 1.20.1 syslog reference](https://github.com/grafana/alloy/blob/v1.20.1/docs/sources/reference/components/loki/loki.source.syslog.md).
 
 Parser selection is configurable:
@@ -643,6 +679,7 @@ below mean the option is unset. YAML examples above are passed as string values.
 | `enable-syslogreceivers` | Boolean | `false` | Receive RFC5424 syslog on TCP/UDP port 1514. |
 | `enable-syslog-rfc3164` | Boolean | `false` | Enable a separate RFC3164 TCP/UDP receiver, independently of RFC5424. |
 | `syslog-rfc3164-port` | Integer | `1513` | RFC3164 port (1–65535); must differ from enabled RFC5424/Alloy HTTP listeners. |
+| `syslog-rfc3164-cisco-components` | String | Empty | Optional comma-separated Cisco header fields: `message_counter,sequence_number,hostname,second_fractions`. Match the sender; opts into experimental parsing. |
 | `syslog-parsers` | String | Empty | Optional comma-separated `opnsense_filterlog,cisco_ios`; empty disables parsing. |
 | `syslog-drop-access-logs` | Boolean | `false` | Drop common HTTP request-style remote syslog lines. |
 | `syslog-drop-expressions` | String | Empty | Newline-separated regexes for dropping remote syslog lines. |

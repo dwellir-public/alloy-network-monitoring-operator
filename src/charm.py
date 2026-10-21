@@ -67,7 +67,11 @@ from network_monitoring import (
     parse_snmp_authentications,
     read_snmp_module_errors,
 )
-from network_syslog import SyslogParsersError
+from network_syslog import (
+    SyslogParsersError,
+    parse_cisco_header_components,
+    with_cisco_stability_args,
+)
 from outbound_endpoints import OutboundEndpoint, dedupe_endpoints
 from secret_files import SecretFiles, remove_secret_files, stage_secret_files
 
@@ -1183,7 +1187,9 @@ class AlloyCharm(ops.CharmBase):
             self._stop_network_on_access_failure()
             message = (
                 str(exc)
-                if isinstance(exc, (InvalidLogLevelError, InvalidSyslogPortError))
+                if isinstance(
+                    exc, (InvalidLogLevelError, InvalidSyslogPortError, SyslogParsersError)
+                )
                 else "Invalid Alloy runtime arguments"
             )
             return ops.BlockedStatus(message)
@@ -1389,6 +1395,7 @@ class AlloyCharm(ops.CharmBase):
             enable_syslog_receivers=self._syslog_receivers_enabled(),
             enable_syslog_rfc3164=bool(self.config.get("enable-syslog-rfc3164", False)),
             syslog_rfc3164_port=int(self.config.get("syslog-rfc3164-port", 1513)),
+            syslog_rfc3164_cisco_components=self._syslog_cisco_components(),
             syslog_drop_access_logs=self._syslog_drop_access_logs(),
             syslog_drop_expressions=self._syslog_drop_expressions(),
             syslog_rate_limit=self._syslog_rate_limit(),
@@ -1425,7 +1432,10 @@ class AlloyCharm(ops.CharmBase):
             with tempfile.NamedTemporaryFile("w", delete=False, suffix=".alloy") as tmp:
                 tmp.write(config_text)
                 tmp_path = Path(tmp.name)
-            alloy.verify_config(config_path=tmp_path)
+            if self._syslog_cisco_components():
+                alloy.verify_config(config_path=tmp_path, experimental=True)
+            else:
+                alloy.verify_config(config_path=tmp_path)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Alloy config verification failed (%s)", type(exc).__name__)
             return False
@@ -1457,7 +1467,22 @@ class AlloyCharm(ops.CharmBase):
         alloy.write_service_defaults(self._desired_custom_args())
 
     def _desired_custom_args(self) -> str:
-        return str(self.config.get("custom_args", "--server.http.listen-addr=127.0.0.1:6987"))
+        """Preserve operator arguments and enable Cisco's experimental parser when selected."""
+        arguments = str(self.config.get("custom_args", "--server.http.listen-addr=127.0.0.1:6987"))
+        return (
+            with_cisco_stability_args(arguments) if self._syslog_cisco_components() else arguments
+        )
+
+    def _syslog_cisco_components(self) -> tuple[str, ...]:
+        """Select Cisco header fields only for the enabled managed RFC3164 receiver."""
+        if (
+            not self.config.get("enable-syslog-rfc3164")
+            or str(self.config.get("config-override", "")).strip()
+        ):
+            return ()
+        return parse_cisco_header_components(
+            self.config.get("syslog-rfc3164-cisco-components", "")
+        )
 
     def _self_metrics_address(self) -> str:
         """Scrape the local listener selected by the actual service arguments."""
@@ -1485,10 +1510,15 @@ class AlloyCharm(ops.CharmBase):
                 self._stored.livedebug_prev_custom_args_set = True
             else:
                 self._stored.livedebug_prev_custom_args = baseline_custom_args
-            alloy.write_custom_args("--server.http.listen-addr=0.0.0.0:12345")
+            debug_args = "--server.http.listen-addr=0.0.0.0:12345"
+            if self._syslog_cisco_components():
+                debug_args = with_cisco_stability_args(debug_args)
+            alloy.write_custom_args(debug_args)
             return
         if self._stored.livedebug_prev_custom_args_set:
             previous = self._stored.livedebug_prev_custom_args or baseline_custom_args
+            if self._stored.last_custom_args != baseline_custom_args:
+                previous = baseline_custom_args
             alloy.write_custom_args(previous or None)
             self._stored.livedebug_prev_custom_args = ""
             self._stored.livedebug_prev_custom_args_set = False

@@ -182,9 +182,14 @@ def get_version() -> str | None:
     return fallback.group(1) if fallback else None
 
 
-def verify_config(*, config_path: Path, timeout: int = DEFAULT_VERIFY_TIMEOUT) -> None:
+def verify_config(
+    *, config_path: Path, timeout: int = DEFAULT_VERIFY_TIMEOUT, experimental: bool = False
+) -> None:
     """Validate component schemas and references with Alloy's semantic validator."""
-    _run(["alloy", "validate", str(config_path)], timeout=timeout)
+    arguments = ["alloy", "validate", str(config_path)]
+    if experimental:
+        arguments.append("--stability.level=experimental")
+    _run(arguments, timeout=timeout)
 
 
 def is_active(*, timeout: int = DEFAULT_STATUS_TIMEOUT) -> bool:

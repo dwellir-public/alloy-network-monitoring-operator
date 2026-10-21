@@ -13,6 +13,15 @@ RFC3164 port ranges or conflicts are rejected before validation/apply, retaining
 the previous generation. Configuration changes reload Alloy; charm refresh
 preserves the running generation until subsequent reconciliation.
 
+Optional `syslog-rfc3164-cisco-components` fields enable Cisco IOS header
+extensions on the legacy listeners. Managed validation/runtime arguments select
+experimental stability consistently, including live debugging transitions. A
+dedicated processor restores Cisco's `%FACILITY-SEVERITY-MNEMONIC:` tag when
+the header decoder separates it into the app-name label, then forwards into the
+shared processing path. No extra indexed labels are added. Runtime stability
+changes restart Alloy through the existing transactional generation apply;
+field-only changes reload. Upgrade hooks still preserve the running generation.
+
 ```mermaid
 flowchart LR
     NetBox[NetBox HTTP discovery] --> HTTP[discovery.http]

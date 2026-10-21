@@ -2,8 +2,20 @@
 # See LICENSE file for licensing details.
 
 import subprocess
+from pathlib import Path
 
 import alloy
+
+
+def test_semantic_validation_uses_opted_in_stability_level(monkeypatch):
+    calls = []
+    monkeypatch.setattr(alloy, "_run", lambda args, **_: calls.append(args))
+    alloy.verify_config(config_path=Path("candidate.alloy"))
+    alloy.verify_config(config_path=Path("candidate.alloy"), experimental=True)
+    assert calls == [
+        ["alloy", "validate", "candidate.alloy"],
+        ["alloy", "validate", "candidate.alloy", "--stability.level=experimental"],
+    ]
 
 
 def _completed(*, stdout: str = "", stderr: str = "") -> subprocess.CompletedProcess[str]:

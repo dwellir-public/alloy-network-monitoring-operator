@@ -48,6 +48,9 @@ enhanced-memory preference, and an interface alert's pending/firing/recovery.
 It skips explicitly when `PROMTOOL_BINARY` is absent; CI supplies both binaries.
 Native receiver tests exercise generated RFC3164 TCP/UDP reception both alone
 and alongside RFC5424, including Cisco body parsing and source identity.
+They also replay a captured Cisco counter/millisecond header and a header with
+all four Cisco extensions, preserving the message tag and parser metadata.
+The tests use the documented experimental stability flag for Cisco extensions.
 Alloy parser tests preserve
 original OPNsense IPv4/IPv6/ICMP and Cisco messages and check extracted fields.
 
@@ -122,6 +125,8 @@ inputs, the common artifact/model/base inputs and `TEST_MODEL_UUID` matching
 `uv run pytest tests/integration/test_artifact.py -k independent_rfc3164_receiver`.
 It checks TCP/UDP delivery on 1513, custom ports, simultaneous RFC5424, topology
 and parsed metadata in Loki, invalid-port retention and receiver disablement.
+Both standard and Cisco extended headers are covered. Add `and True` to the
+pytest `-k` expression to select only the Cisco header case.
 
 The test creates uniquely named applications, fake Juju secrets and loopback
 inventory/metrics sources. A colocated fixture publishes real provider topology

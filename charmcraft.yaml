@@ -191,6 +191,18 @@ config:
         and from the Alloy HTTP listener port. Ignored when RFC3164 is disabled.
       default: 1513
       type: int
+    syslog-rfc3164-cisco-components:
+      description: |
+        Optional comma-separated Cisco IOS header fields: message_counter,
+        sequence_number,hostname,second_fractions. Empty keeps standard RFC3164.
+        Match the fields actually sent by every device using port 1513 (or the
+        configured RFC3164 port). Separate from the cisco_ios message-body parser.
+        Selecting fields opts into Alloy's experimental Cisco parser and adds
+        --stability.level=experimental to managed runtime arguments. Adding or
+        removing that flag restarts Alloy; changing fields within the mode reloads.
+        Ignored when RFC3164 is disabled or config-override is set.
+      type: string
+      default: ""
     syslog-parsers:
       description: |
         Optional comma-separated parsing profiles: opnsense_filterlog,cisco_ios.
